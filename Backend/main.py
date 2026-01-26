@@ -8,6 +8,13 @@ from groq import Groq
 from dotenv import load_dotenv
 import time
 from functools import lru_cache
+try:
+    from googletrans import Translator
+    TRANSLATOR_AVAILABLE = True
+    print("✓ googletrans loaded successfully")
+except ImportError:
+    TRANSLATOR_AVAILABLE = False
+    print("✗ googletrans not installed. Install with: pip install googletrans==4.0.0rc1")
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -36,7 +43,125 @@ def get_groq_client():
         groq_client = Groq(api_key=GROQ_API_KEY)
     return groq_client
 
-# Pre-compile regex patterns for better performance
+def detect_language(text: str) -> str:
+    """Detect language using Unicode ranges"""
+    try:
+        if re.search(r'[\u0B80-\u0BFF]', text):
+            return 'ta'
+        elif re.search(r'[\u0900-\u097F]', text):
+            return 'hi'
+        elif re.search(r'[\u0600-\u06FF]', text):
+            return 'ar'
+        elif re.search(r'[\u4E00-\u9FFF]', text):
+            return 'zh-CN'
+        elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', text):
+            return 'ja'
+        elif re.search(r'[\uAC00-\uD7AF]', text):
+            return 'ko'
+        elif re.search(r'[\u0400-\u04FF]', text):
+            return 'ru'
+        elif re.search(r'[\u0C00-\u0C7F]', text):
+            return 'te'
+        elif re.search(r'[\u0D00-\u0D7F]', text):
+            return 'ml'
+        elif re.search(r'[\u0980-\u09FF]', text):
+            return 'bn'
+        return 'en'
+    except:
+        return 'en'
+
+def translate_headings(lang_code: str) -> dict:
+    """Translate section headings using googletrans library - NO hardcoding"""
+    if lang_code == 'en':
+        return {
+            'intro': 'INTRODUCTION',
+            'concepts': 'CORE CONCEPTS',
+            'fundamental': 'FUNDAMENTAL CONCEPTS',
+            'detailed': 'DETAILED EXPLANATION',
+            'example': 'EXAMPLE',
+            'examples': 'REAL-WORLD EXAMPLES',
+            'applications': 'APPLICATIONS',
+            'advantages': 'ADVANTAGES',
+            'limitations': 'LIMITATIONS',
+            'conclusion': 'CONCLUSION',
+            'insights': 'KEY INSIGHTS'
+        }
+    
+    if not TRANSLATOR_AVAILABLE:
+        print(f"⚠ googletrans not available, using English headings")
+        return {
+            'intro': 'INTRODUCTION',
+            'concepts': 'CORE CONCEPTS',
+            'fundamental': 'FUNDAMENTAL CONCEPTS',
+            'detailed': 'DETAILED EXPLANATION',
+            'example': 'EXAMPLE',
+            'examples': 'REAL-WORLD EXAMPLES',
+            'applications': 'APPLICATIONS',
+            'advantages': 'ADVANTAGES',
+            'limitations': 'LIMITATIONS',
+            'conclusion': 'CONCLUSION',
+            'insights': 'KEY INSIGHTS'
+        }
+    
+    # Translate dynamically using Google Translate
+    try:
+        translator = Translator()
+        
+        english_headings = {
+            'intro': 'introduction',
+            'concepts': 'core concepts',
+            'fundamental': 'fundamental concepts',
+            'detailed': 'detailed explanation',
+            'example': 'example',
+            'examples': 'real world examples',
+            'applications': 'applications',
+            'advantages': 'advantages',
+            'limitations': 'limitations',
+            'conclusion': 'conclusion',
+            'insights': 'key insights'
+        }
+        
+        translated_headings = {}
+        
+        print(f"🔄 Translating headings to language: {lang_code}")
+        
+        for key, english_text in english_headings.items():
+            try:
+                result = translator.translate(english_text, src='en', dest=lang_code)
+                if result and hasattr(result, 'text') and result.text:
+                    translated_text = result.text.upper()
+                    translated_headings[key] = translated_text
+                    print(f"  ✓ '{english_text}' → '{translated_text}'")
+                else:
+                    translated_headings[key] = english_text.upper()
+                    print(f"  ✗ '{english_text}' → fallback to English")
+            except Exception as e:
+                print(f"  ✗ Translation error for '{english_text}': {e}")
+                translated_headings[key] = english_text.upper()
+        
+        print(f"✓ Translation complete for {lang_code}")
+        return translated_headings
+    except Exception as e:
+        print(f"✗ Translation service error: {e}")
+        return {
+            'intro': 'INTRODUCTION',
+            'concepts': 'CORE CONCEPTS',
+            'fundamental': 'FUNDAMENTAL CONCEPTS',
+            'detailed': 'DETAILED EXPLANATION',
+            'example': 'EXAMPLE',
+            'examples': 'REAL-WORLD EXAMPLES',
+            'applications': 'APPLICATIONS',
+            'advantages': 'ADVANTAGES',
+            'limitations': 'LIMITATIONS',
+            'conclusion': 'CONCLUSION',
+            'insights': 'KEY INSIGHTS'
+        }
+
+def get_section_headings(lang_code: str) -> dict:
+    """Get section headings by translating from English"""
+    return translate_headings(lang_code)
+
+# Pre-compile regex patterns
 GREETING_PATTERN = re.compile(r'^\s*(hello|hi|hey|greetings|good morning|good afternoon|good evening|what\'s up|howdy|hiya)\b', re.IGNORECASE)
 PAGE_PATTERN = re.compile(r'(\d+)\s*pages?\b', re.IGNORECASE)
 MARK_PATTERN = re.compile(r'(\d+)\s*(?:mark|marks)\b', re.IGNORECASE)
@@ -65,19 +190,16 @@ def extract_questions_comprehensive_cached(text: str) -> tuple:
         if not line or len(line) > 200:
             continue
         
-        # Only skip pure section headers
         if (line.lower() in ['introduction', 'key features', 'applications', 'conclusion', 'references'] 
             and not any(word in line.lower() for word in ['define', 'what', 'list', 'explain', 'state', 'name'])):
             continue
         
-        # Unnumbered questions
         if not re.match(r'^\d+\.', line) and any(word in line.lower() for word in ['define', 'what', 'list', 'explain', 'state', 'name']):
             if 10 < len(line) < 150:
                 if not line.endswith('?'):
                     line += '?'
                 questions.append(line)
         
-        # Numbered questions
         elif re.match(r'^\d+\.', line):
             question = re.sub(r'^\d+\.\s*', '', line)
             if question and 5 < len(question) < 150:
@@ -88,7 +210,6 @@ def extract_questions_comprehensive_cached(text: str) -> tuple:
                         question = f"What is {question}?"
                 questions.append(question)
     
-    # Remove duplicates
     seen = set()
     unique_questions = []
     for q in questions:
@@ -104,7 +225,7 @@ def extract_questions_comprehensive(text: str) -> list:
     return list(extract_questions_comprehensive_cached(text))
 
 def get_recent_messages_fast(messages: List[dict], max_messages: int = 6) -> List[dict]:
-    """Get recent messages - optimized for performance"""
+    """Get recent messages"""
     if len(messages) <= max_messages:
         return messages
     
@@ -121,37 +242,43 @@ def get_recent_messages_fast(messages: List[dict], max_messages: int = 6) -> Lis
     return recent
 
 def calculate_word_count_from_pages(pages: int) -> int:
-    """Calculate word count based on number of pages"""
+    """Calculate word count from pages"""
     return pages * 250
 
 def calculate_word_count_from_marks(marks: int) -> int:
-    """Calculate word count based on marks"""
+    """Calculate word count from marks"""
     return marks * 50
 
 def create_html_table_fast(schedule_data: list, topic: str) -> str:
-    """Fast HTML table creation"""
+    """Create HTML table for schedule"""
     if not schedule_data:
         return ""
     
     rows = []
     for i, row in enumerate(schedule_data):
         bg_color = "rgba(255, 255, 255, 0.05)" if i % 2 == 0 else "rgba(255, 255, 255, 0.1)"
+        day_text = str(row[0])
+        topic_text = str(row[1])
+        time_text = str(row[2])
+        
         rows.append(f'''<tr style="background-color: {bg_color};">
-<td style="border: 1px solid rgba(255, 255, 255, 0.2); padding: 10px; color: white;">{row[0]}</td>
-<td style="border: 1px solid rgba(255, 255, 255, 0.2); padding: 10px; color: white;">{row[1]}</td>
-<td style="border: 1px solid rgba(255, 255, 255, 0.2); padding: 10px; color: white;">{row[2]}</td>
+<td style="border: 1px solid rgba(255, 255, 255, 0.2); padding: 12px; color: white; font-family: 'Segoe UI', Arial, sans-serif; white-space: normal; word-wrap: break-word;">{day_text}</td>
+<td style="border: 1px solid rgba(255, 255, 255, 0.2); padding: 12px; color: white; font-family: 'Segoe UI', Arial, sans-serif; white-space: normal; word-wrap: break-word;">{topic_text}</td>
+<td style="border: 1px solid rgba(255, 255, 255, 0.2); padding: 12px; color: white; font-family: 'Segoe UI', Arial, sans-serif; white-space: normal; word-wrap: break-word;">{time_text}</td>
 </tr>''')
     
-    return f'''<div style="margin: 20px 0;">
-<h3 style="font-family: Arial, sans-serif; color: white; margin-bottom: 15px;">
-Study Plan: {topic} ({len(schedule_data)} days, 2 hours/day)
+    topic_display = str(topic)
+    
+    return f'''<div style="margin: 20px 0; font-family: 'Segoe UI', Arial, sans-serif;">
+<h3 style="color: white; margin-bottom: 15px; font-family: 'Segoe UI', Arial, sans-serif;">
+Study Plan: {topic_display} ({len(schedule_data)} days)
 </h3>
-<table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; background-color: transparent;">
+<table style="width: 100%; border-collapse: collapse; background-color: transparent; table-layout: auto;">
 <thead>
 <tr style="background-color: rgba(68, 114, 196, 0.3); color: white;">
-<th style="border: 1px solid rgba(255, 255, 255, 0.3); padding: 12px; text-align: left; font-weight: 600; color: white;">Day</th>
-<th style="border: 1px solid rgba(255, 255, 255, 0.3); padding: 12px; text-align: left; font-weight: 600; color: white;">Topic</th>
-<th style="border: 1px solid rgba(255, 255, 255, 0.3); padding: 12px; text-align: left; font-weight: 600; color: white;">Time</th>
+<th style="border: 1px solid rgba(255, 255, 255, 0.3); padding: 12px; text-align: left; font-weight: 600; color: white; font-family: 'Segoe UI', Arial, sans-serif; width: 15%;">Day</th>
+<th style="border: 1px solid rgba(255, 255, 255, 0.3); padding: 12px; text-align: left; font-weight: 600; color: white; font-family: 'Segoe UI', Arial, sans-serif; width: 65%;">Topic</th>
+<th style="border: 1px solid rgba(255, 255, 255, 0.3); padding: 12px; text-align: left; font-weight: 600; color: white; font-family: 'Segoe UI', Arial, sans-serif; width: 20%;">Time</th>
 </tr>
 </thead>
 <tbody>
@@ -161,8 +288,13 @@ Study Plan: {topic} ({len(schedule_data)} days, 2 hours/day)
 </div>'''
 
 def process_schedule_with_html_table_fast(response_text: str, latest_user_msg: str) -> str:
-    """Extract schedule and convert to HTML table, removing original schedule text"""
-    schedule_markers = ["Schedule:", "STUDY SCHEDULE:", "Study Schedule:", "STUDY PLAN:"]
+    """Extract schedule and convert to HTML"""
+    day_patterns = [
+        r'Day\s*\d+', r'நாள்\s*\d+', r'Día\s*\d+', r'Jour\s*\d+',
+        r'Tag\s*\d+', r'日\s*\d+', r'\d+\s*день',
+    ]
+    
+    schedule_markers = ["Schedule:", "STUDY SCHEDULE:", "Study Schedule:", "STUDY PLAN:", "அட்டவணை:", "Horario:"]
     schedule_start_idx = -1
     
     for marker in schedule_markers:
@@ -174,8 +306,11 @@ def process_schedule_with_html_table_fast(response_text: str, latest_user_msg: s
     if schedule_start_idx == -1:
         lines = response_text.split('\n')
         for i, line in enumerate(lines):
-            if 'Day 1' in line or 'Day1' in line:
-                schedule_start_idx = response_text.find(line)
+            for pattern in day_patterns:
+                if re.search(pattern, line):
+                    schedule_start_idx = response_text.find(line)
+                    break
+            if schedule_start_idx != -1:
                 break
     
     if schedule_start_idx == -1:
@@ -193,7 +328,7 @@ def process_schedule_with_html_table_fast(response_text: str, latest_user_msg: s
             continue
         
         lower_line = line.lower()
-        if any(header in lower_line for header in ['day|topic|time', 'day | topic | time', '---', '===', 'schedule:', 'study schedule:', 'study plan:']):
+        if any(header in lower_line for header in ['day|topic|time', 'day | topic | time', '---', '===', 'schedule:', 'study schedule:', 'study plan:', 'அட்டவணை:']):
             continue
         
         if '|' in line:
@@ -202,25 +337,44 @@ def process_schedule_with_html_table_fast(response_text: str, latest_user_msg: s
                 day_part = parts[0]
                 topic_part = parts[1]
                 time_part = parts[2]
-                if 'day' in day_part.lower() and topic_part:
+                if day_part and topic_part and len(topic_part) > 3:
                     schedule_lines.append([day_part, topic_part, time_part])
         
-        elif re.search(r'Day\s*\d+', line, re.IGNORECASE):
-            day_match = re.search(r'(Day\s*\d+)', line, re.IGNORECASE)
-            if day_match:
-                day_part = day_match.group(0)
-                remaining = line[day_match.end():].strip()
-                
-                time_match = re.search(r'(\d+\s*(?:hours?|hrs?|h))', remaining, re.IGNORECASE)
-                if time_match:
-                    time_part = time_match.group(1)
-                    topic_part = remaining[:time_match.start()].strip(' -:|')
-                else:
+        else:
+            day_found = False
+            day_part = ""
+            for pattern in day_patterns:
+                day_match = re.search(pattern, line, re.IGNORECASE)
+                if day_match:
+                    day_part = day_match.group(0)
+                    remaining = line[day_match.end():].strip()
+                    day_found = True
+                    
+                    time_patterns = [
+                        r'(\d+\s*(?:hours?|hrs?|h))', r'(\d+\s*(?:மணி நேரம்|மணி))',
+                        r'(\d+\s*(?:horas?))', r'(\d+\s*(?:heures?))',
+                        r'(\d+\s*(?:Stunden?))', r'(\d+\s*(?:小时|時間))',
+                    ]
+                    
                     time_part = '2 hours'
-                    topic_part = remaining.strip(' -:|')
-                
-                if topic_part and len(topic_part) > 3:
-                    schedule_lines.append([day_part, topic_part, time_part])
+                    topic_part = remaining
+                    
+                    for time_pattern in time_patterns:
+                        time_match = re.search(time_pattern, remaining, re.IGNORECASE)
+                        if time_match:
+                            time_part = time_match.group(1)
+                            topic_part = remaining[:time_match.start()].strip(' -:|')
+                            break
+                    
+                    if not topic_part or len(topic_part) <= 3:
+                        topic_part = remaining.strip(' -:|')
+                    
+                    if topic_part and len(topic_part) > 3:
+                        schedule_lines.append([day_part, topic_part, time_part])
+                    break
+            
+            if not day_found:
+                continue
     
     if schedule_lines:
         html_table = create_html_table_fast(schedule_lines, latest_user_msg[:50])
@@ -229,9 +383,9 @@ def process_schedule_with_html_table_fast(response_text: str, latest_user_msg: s
     return response_text
 
 def detect_mode_from_message(msg_lower: str) -> Tuple[str, int]:
-    """Detect mode from a single message"""
-    if any(term in msg_lower for term in ["explain in detail", "detailed", "comprehensive", "1000 words", "800 words", "16 mark", "16 marks"]):
-        return "detailed", 2
+    """Detect mode from message"""
+    if any(term in msg_lower for term in ["explain in detail", "detailed explanation", "comprehensive", "in depth"]):
+        return "detailed_no_schedule", 2
     
     if any(term in msg_lower for term in ["teach me", "explain like", "for beginners", "simple"]):
         return "teaching", 2
@@ -248,7 +402,7 @@ def detect_mode_from_message(msg_lower: str) -> Tuple[str, int]:
     return "detailed", 2
 
 def process_detailed_response_without_schedule(user_message: str, messages: List[dict]) -> str:
-    """Process detailed response without study schedule"""
+    """Process detailed response without schedule"""
     msg_lower = user_message.lower()
     
     page_match = PAGE_PATTERN.search(msg_lower)
@@ -268,9 +422,11 @@ def process_detailed_response_without_schedule(user_message: str, messages: List
             "7. CONCLUSION: Summary of key insights\n\n"
             f"CRITICAL RULES:\n"
             f"- Write approximately {word_count} words\n"
+            f"- Respond in the SAME language as the user's query (including headings)\n"
             f"- Stay focused on the topic without adding study schedules\n"
-            f"- Format as plain text with section headings in ALL CAPS\n"
-            f"- NO STUDY SCHEDULE OR TIMETABLE"
+            f"- Format as plain text with section headings\n"
+            f"- NO STUDY SCHEDULE OR TIMETABLE\n"
+            f"- Provide expert-level depth with specific examples and data"
         )
         
         recent_messages = get_recent_messages_fast(messages, 4)
@@ -280,8 +436,9 @@ def process_detailed_response_without_schedule(user_message: str, messages: List
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=api_messages,
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=min(word_count * 2, 8000),
+            top_p=0.95,
             stop=None
         )
         return completion.choices[0].message.content.strip()
@@ -308,10 +465,11 @@ def process_detailed_response_without_schedule(user_message: str, messages: List
             "11. Applications: Provide real-world use cases and applications\n"
             "12. Versions/Evolution: If applicable, discuss different versions or evolution\n"
             "13. Conclusion: Summarize key points and future outlook\n\n"
-            "CRITICAL RULES:\n"
+            f"CRITICAL RULES:\n"
             f"- Write as a CONTINUOUS ESSAY, NOT as Q&A or bullet points\n"
+            f"- Respond in the SAME language as the user's query (including all headings)\n"
             f"- Aim for approximately {word_count} words\n"
-            f"- Use clear section headings in regular format (not ALL CAPS)\n"
+            f"- Use clear section headings in the query's language\n"
             f"- Include detailed explanations with examples where relevant\n"
             f"- Ensure smooth transitions between sections\n"
             f"- NO ANSWER KEY, NO MARKS ALLOCATION section\n"
@@ -326,8 +484,9 @@ def process_detailed_response_without_schedule(user_message: str, messages: List
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=api_messages,
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=min(word_count * 2, 8000),
+            top_p=0.95,
             stop=None
         )
         return completion.choices[0].message.content.strip()
@@ -342,6 +501,9 @@ async def chat(request: ChatRequest):
         latest_user_msg = messages[-1]["content"]
         msg_lower = latest_user_msg.lower()
         
+        detected_lang = detect_language(latest_user_msg)
+        headings = get_section_headings(detected_lang)
+        
         if is_greeting(latest_user_msg):
             return {"response": "Hello! I'm NexusAI, your intelligent assistant. How can I help you today?"}
         
@@ -354,14 +516,47 @@ async def chat(request: ChatRequest):
         
         current_mode, current_point_count = detect_mode_from_message(msg_lower)
         
+        if current_mode == "detailed_no_schedule":
+            system_prompt = (
+                f"You are NexusAI, a university-level academic expert. Provide COMPREHENSIVE, IN-DEPTH explanation of 1200-1500 words.\n\n"
+                f"CRITICAL LANGUAGE RULE:\n"
+                f"- User query is in '{detected_lang}' language\n"
+                f"- Respond 100% in '{detected_lang}' language - EVERYTHING including headings\n"
+                f"- DO NOT use English headings\n"
+                f"- MANDATORY: Use ONLY these headings:\n"
+                f"  1. {headings['intro']}\n"
+                f"  2. {headings['fundamental']}\n"
+                f"  3. {headings['detailed']}\n"
+                f"  4. {headings['examples']}\n"
+                f"  5. {headings['applications']}\n"
+                f"  6. {headings['advantages']}\n"
+                f"  7. {headings['limitations']}\n"
+                f"  8. {headings['conclusion']}\n\n"
+                f"CRITICAL: Write ENTIRELY in '{detected_lang}' language. Copy provided headings EXACTLY."
+            )
+            
+            recent_messages = get_recent_messages_fast(messages, 4)
+            api_messages = [{"role": "system", "content": system_prompt}] + recent_messages
+            
+            client = get_groq_client()
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=api_messages,
+                temperature=0.2,
+                max_tokens=6000,
+                top_p=0.95,
+                stop=None
+            )
+            return {"response": completion.choices[0].message.content.strip()}
+        
         if current_mode == "points":
             current_questions = extract_questions_comprehensive(latest_user_msg)
             
             if current_questions:
                 system_prompt = (
                     f"EXAM MODE: EXACTLY {current_point_count} points per question. "
-                    "RULES: Ultra-concise answers. Each point = 5-8 words MAX. "
-                    "NO explanations. FORMAT: '1. Question text\n• Point 1.\n• Point 2.'"
+                    f"Respond in '{detected_lang}' language. "
+                    f"Ultra-concise. Each point = 5-8 words MAX."
                 )
                 questions_text = "\n".join([f"{i+1}. {q}" for i, q in enumerate(current_questions)])
                 api_messages = [
@@ -374,13 +569,18 @@ async def chat(request: ChatRequest):
                     model="llama-3.3-70b-versatile",
                     messages=api_messages,
                     temperature=0.1,
-                    max_tokens=2000,
+                    max_tokens=2500,
+                    top_p=0.85,
                     stop=None
                 )
                 return {"response": completion.choices[0].message.content.strip()}
         
         if current_mode == "teaching":
-            system_prompt = "You are NexusAI, a patient teacher. Explain simply like to a 10-year-old. Use short sentences, analogies, and examples. Avoid jargon completely."
+            system_prompt = (
+                f"You are NexusAI, a patient teacher. "
+                f"Respond in '{detected_lang}' language. "
+                f"Use simple language and analogies."
+            )
             recent_messages = get_recent_messages_fast(messages, 4)
             api_messages = [{"role": "system", "content": system_prompt}] + recent_messages
             
@@ -388,42 +588,18 @@ async def chat(request: ChatRequest):
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=api_messages,
-                temperature=0.3,
+                temperature=0.4,
                 max_tokens=2000,
+                top_p=0.9,
                 stop=None
             )
             return {"response": completion.choices[0].message.content.strip()}
         
         system_prompt = (
-            "You are NexusAI, a university-level academic tutor. Provide comprehensive 500-800 word explanations followed by a study schedule.\n"
-            "STRUCTURE:\n"
-            "1. INTRODUCTION: Brief definition (2-3 sentences)\n"
-            "2. CORE CONCEPTS: Key components and how they work\n"
-            "3. EXAMPLE: One concrete real-world scenario\n"
-            "4. APPLICATIONS: 2-3 practical use cases\n"
-            "5. KEY TAKEAWAY: Main insights\n\n"
-            "STUDY SCHEDULE:\n"
-            "Generate EXACTLY 14 days with topic-specific content.\n"
-            "CRITICAL FORMAT REQUIREMENT - Use EXACTLY this format with pipe separators:\n"
-            "Day 1|Foundational concepts|2 hours\n"
-            "Day 2|Core principles|2 hours\n"
-            "Day 3|Intermediate concepts|2 hours\n"
-            "Day 4|Advanced features|2 hours\n"
-            "Day 5|Practical applications|2 hours\n"
-            "Day 6|Problem solving|2 hours\n"
-            "Day 7|Review basics|2 hours\n"
-            "Day 8|Specialized topics|2 hours\n"
-            "Day 9|Integration|2 hours\n"
-            "Day 10|Projects|2 hours\n"
-            "Day 11|Optimization|2 hours\n"
-            "Day 12|Advanced concepts|2 hours\n"
-            "Day 13|Review practice|2 hours\n"
-            "Day 14|Final assessment|2 hours\n\n"
-            "CRITICAL RULES:\n"
-            "- Explanation: 500-800 words MAX\n"
-            "- Schedule: EXACTLY 14 lines with Day|Topic|Time format\n"
-            "- MUST use pipe separators (|) for every schedule line\n"
-            "- NO bullet points, NO dashes, NO colons in schedule - ONLY pipes"
+            f"You are NexusAI. Provide 600-800 word explanation followed by study schedule.\n"
+            f"Respond in '{detected_lang}' language.\n"
+            f"Use headings: {headings['intro']}, {headings['concepts']}, {headings['example']}, {headings['applications']}, {headings['insights']}\n"
+            f"Then 14-day schedule with pipe format: Day 1|Topic|2 hours"
         )
         
         recent_messages = get_recent_messages_fast(messages, 6)
@@ -433,8 +609,9 @@ async def chat(request: ChatRequest):
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=api_messages,
-            temperature=0.3,
-            max_tokens=3000,
+            temperature=0.25,
+            max_tokens=5000,
+            top_p=0.92,
             stop=None
         )
         
@@ -445,10 +622,7 @@ async def chat(request: ChatRequest):
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"Error in chat endpoint: {str(e)}")
-        print(f"Full traceback: {error_details}")
+        print(f"Error: {str(e)}")
+        print(f"Traceback: {error_details}")
         
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred while processing your request. Please try again."
-        )
+        raise HTTPException(status_code=500, detail="An error occurred. Please try again.")
