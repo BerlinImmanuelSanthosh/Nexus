@@ -48,8 +48,8 @@ const Sidebar = memo(({
 
       <aside
         className={cn(
-          "fixed left-0 top-0 z-50 flex h-full w-64 flex-col bg-sidebar/95 backdrop-blur-md border-r border-sidebar-border transition-all duration-300 ease-in-out md:relative",
-          isOpen ? "translate-x-0 opacity-100" : "-translate-x-full opacity-0 md:opacity-0"
+          "flex h-full flex-col bg-sidebar/95 backdrop-blur-md border-r border-sidebar-border transition-all duration-300 ease-in-out overflow-hidden",
+          isOpen ? "w-64 opacity-100" : "w-0 opacity-0 border-r-0"
         )}
       >
         <div className="flex items-center justify-between p-4">
@@ -111,7 +111,7 @@ const Sidebar = memo(({
         <Button
           variant="ghost"
           size="icon"
-          className="fixed left-4 top-4 z-30 h-10 w-10 bg-secondary/80 backdrop-blur-sm hover:bg-secondary md:absolute"
+          className="absolute left-4 top-4 z-30 h-10 w-10 bg-secondary/80 backdrop-blur-sm hover:bg-secondary"
           onClick={handleToggleClick}
         >
           <PanelLeft className="h-5 w-5" />
