@@ -48,10 +48,9 @@ const Sidebar = memo(({
 
       <aside
         className={cn(
-          "fixed left-0 top-0 z-50 flex h-full w-64 flex-col bg-sidebar/95 backdrop-blur-md border-r border-sidebar-border transition-transform duration-300 md:relative md:translate-x-0",
-          isOpen ? "translate-x-0" : "-translate-x-full"
+          "fixed left-0 top-0 z-50 flex h-full w-64 flex-col bg-sidebar/95 backdrop-blur-md border-r border-sidebar-border transition-all duration-300 ease-in-out md:relative",
+          isOpen ? "translate-x-0 opacity-100" : "-translate-x-full opacity-0 md:opacity-0"
         )}
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-4">
           <h1 className="text-lg font-semibold gradient-text">NexusAI</h1>
