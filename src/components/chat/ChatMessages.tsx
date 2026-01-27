@@ -1,7 +1,7 @@
 import { useRef, useEffect, memo } from 'react';
 import { Message } from '@/types/chat';
 import MessageBubble from './MessageBubble';
-import LoadingIndicator from './LoadingIndicator';
+import ThinkingRobot from './ThinkingRobot';
 import { Sparkles } from 'lucide-react';
 
 interface ChatMessagesProps {
@@ -37,11 +37,8 @@ const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
       ))}
       {isTyping && (
         <div className="flex gap-4 animate-fade-in">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/20">
-            <Sparkles className="h-4 w-4 text-primary animate-pulse" />
-          </div>
           <div className="rounded-2xl rounded-bl-md bg-chat-ai">
-            <LoadingIndicator />
+            <ThinkingRobot />
           </div>
         </div>
       )}
