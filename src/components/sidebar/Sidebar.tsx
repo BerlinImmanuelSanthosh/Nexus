@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Conversation } from '@/types/chat';
 import ConversationItem from './ConversationItem';
 import { cn } from '@/lib/utils';
+import { memo, useCallback } from 'react';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -14,7 +15,7 @@ interface SidebarProps {
   onToggle: () => void;
 }
 
-const Sidebar = ({ 
+const Sidebar = memo(({ 
   conversations, 
   activeId, 
   onSelect, 
@@ -23,21 +24,32 @@ const Sidebar = ({
   isOpen,
   onToggle 
 }: SidebarProps) => {
+  const handleOverlayClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onToggle();
+  }, [onToggle]);
+
+  const handleNewChat = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onNew();
+  }, [onNew]);
+
   return (
     <>
       {/* Mobile overlay */}
       {isOpen && (
         <div 
           className="fixed inset-0 z-40 bg-background/80 backdrop-blur-sm md:hidden"
-          onClick={onToggle}
+          onClick={handleOverlayClick}
         />
       )}
 
       <aside
         className={cn(
-          "fixed left-0 top-0 z-50 flex h-full w-64 flex-col bg-sidebar border-r border-sidebar-border transition-transform duration-300 md:relative md:translate-x-0",
+          "fixed left-0 top-0 z-50 flex h-full w-64 flex-col bg-sidebar/95 backdrop-blur-md border-r border-sidebar-border transition-transform duration-300 md:relative md:translate-x-0",
           isOpen ? "translate-x-0" : "-translate-x-full"
         )}
+        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-4">
           <h1 className="text-lg font-semibold gradient-text">NexusAI</h1>
@@ -45,7 +57,10 @@ const Sidebar = ({
             variant="ghost"
             size="icon"
             className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-            onClick={onToggle}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
+            }}
           >
             <PanelLeftClose className="h-4 w-4" />
           </Button>
@@ -53,7 +68,7 @@ const Sidebar = ({
 
         <div className="px-3">
           <Button
-            onClick={onNew}
+            onClick={handleNewChat}
             className="w-full justify-start gap-2 bg-sidebar-accent text-sidebar-accent-foreground hover:bg-sidebar-accent/80"
           >
             <Plus className="h-4 w-4" />
@@ -82,7 +97,7 @@ const Sidebar = ({
               </p>
             )}
           </div>
-        </div> {/* 👈 This was MISSING! */}
+        </div>
 
         <div className="border-t border-sidebar-border p-4">
           <p className="text-xs text-muted-foreground">
@@ -97,13 +112,18 @@ const Sidebar = ({
           variant="ghost"
           size="icon"
           className="fixed left-4 top-4 z-30 h-10 w-10 bg-secondary/80 backdrop-blur-sm hover:bg-secondary md:absolute"
-          onClick={onToggle}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
         >
           <PanelLeft className="h-5 w-5" />
         </Button>
       )}
     </>
   );
-};
+});
+
+Sidebar.displayName = 'Sidebar';
 
 export default Sidebar;
