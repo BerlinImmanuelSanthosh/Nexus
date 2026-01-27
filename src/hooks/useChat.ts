@@ -1,20 +1,72 @@
-// src/hooks/useChat.ts
 import { useState, useCallback } from 'react';
-import { Message } from '@/types/chat';
+import { Message, Conversation } from '@/types/chat';
+
+const generateId = () => Math.random().toString(36).substring(2, 15);
 
 export function useChat() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [isTyping, setIsTyping] = useState(false);
+
+  const activeConversation = conversations.find(c => c.id === activeConversationId);
+  const messages = activeConversation?.messages || [];
+
+  const createNewConversation = useCallback(() => {
+    const newConversation: Conversation = {
+      id: generateId(),
+      title: 'New Chat',
+      messages: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    setConversations(prev => [newConversation, ...prev]);
+    setActiveConversationId(newConversation.id);
+  }, []);
+
+  const deleteConversation = useCallback((id: string) => {
+    setConversations(prev => prev.filter(c => c.id !== id));
+    if (activeConversationId === id) {
+      setActiveConversationId(null);
+    }
+  }, [activeConversationId]);
 
   const sendMessage = useCallback(async (content: string) => {
-    const userMessage: Message = { id: Date.now(), content, role: 'user' };
-    setMessages(prev => [...prev, userMessage]);
-    setIsLoading(true);
+    let conversationId = activeConversationId;
+
+    // Create new conversation if none exists
+    if (!conversationId) {
+      const newConversation: Conversation = {
+        id: generateId(),
+        title: content.slice(0, 30) + (content.length > 30 ? '...' : ''),
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      setConversations(prev => [newConversation, ...prev]);
+      setActiveConversationId(newConversation.id);
+      conversationId = newConversation.id;
+    }
+
+    const userMessage: Message = {
+      id: generateId(),
+      content,
+      role: 'user',
+      timestamp: new Date(),
+    };
+
+    // Add user message
+    setConversations(prev => prev.map(c => 
+      c.id === conversationId 
+        ? { ...c, messages: [...c.messages, userMessage], updatedAt: new Date() }
+        : c
+    ));
+
+    setIsTyping(true);
 
     try {
-      // Send FULL conversation history (with proper role format)
-      const messagesForBackend = messages
-        .concat(userMessage)
+      // Get current messages for the conversation
+      const currentConversation = conversations.find(c => c.id === conversationId);
+      const messagesForBackend = [...(currentConversation?.messages || []), userMessage]
         .map(msg => ({ 
           role: msg.role, 
           content: msg.content 
@@ -25,7 +77,6 @@ export function useChat() {
         headers: {
           'Content-Type': 'application/json',
         },
-        // Send full history instead of just { message: content }
         body: JSON.stringify({ messages: messagesForBackend }),
       });
 
@@ -35,23 +86,43 @@ export function useChat() {
 
       const data = await response.json();
       const aiMessage: Message = {
-        id: Date.now() + 1,
+        id: generateId(),
         content: data.response,
         role: 'assistant',
+        timestamp: new Date(),
       };
-      setMessages(prev => [...prev, aiMessage]);
+
+      setConversations(prev => prev.map(c => 
+        c.id === conversationId 
+          ? { ...c, messages: [...c.messages, aiMessage], updatedAt: new Date() }
+          : c
+      ));
     } catch (error) {
       console.error('Chat error:', error);
       const errorMessage: Message = {
-        id: Date.now() + 1,
+        id: generateId(),
         content: 'Failed to get a response. Is the backend running?',
         role: 'assistant',
+        timestamp: new Date(),
       };
-      setMessages(prev => [...prev, errorMessage]);
+      setConversations(prev => prev.map(c => 
+        c.id === conversationId 
+          ? { ...c, messages: [...c.messages, errorMessage], updatedAt: new Date() }
+          : c
+      ));
     } finally {
-      setIsLoading(false);
+      setIsTyping(false);
     }
-  }, [messages]); // Critical: Add messages as dependency
+  }, [activeConversationId, conversations]);
 
-  return { messages, sendMessage, isLoading };
+  return {
+    conversations,
+    activeConversationId,
+    messages,
+    isTyping,
+    setActiveConversationId,
+    createNewConversation,
+    sendMessage,
+    deleteConversation,
+  };
 }

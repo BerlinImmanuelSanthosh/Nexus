@@ -1,22 +1,20 @@
 import { Message } from '@/types/chat';
 import { User, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useMemo } from 'react';
+import { useMemo, memo } from 'react';
 
 interface MessageBubbleProps {
   message: Message;
 }
 
-const MessageBubble = ({ message }: MessageBubbleProps) => {
+const MessageBubble = memo(({ message }: MessageBubbleProps) => {
   const isUser = message.role === 'user';
 
   // Convert **bold** and *italic* to <strong> and <em>
-  // Also preserve <pre> tags from backend (for study schedule)
   const formattedContent = useMemo(() => {
     return message.content
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>');
-    // Note: <pre> tags from backend are already valid HTML and will pass through
   }, [message.content]);
 
   return (
@@ -48,6 +46,8 @@ const MessageBubble = ({ message }: MessageBubbleProps) => {
       )}
     </div>
   );
-};
+});
+
+MessageBubble.displayName = 'MessageBubble';
 
 export default MessageBubble;
