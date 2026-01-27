@@ -4,6 +4,7 @@ import ChatMessages from '@/components/chat/ChatMessages';
 import ChatInput from '@/components/chat/ChatInput';
 import { useChat } from '@/hooks/useChat';
 import IntroAnimation from '@/components/ui/IntroAnimation';
+import { cn } from '@/lib/utils';
 
 // Lazy load heavy components
 const AnimatedBackground = lazy(() => import('@/components/ui/AnimatedBackground'));
@@ -55,7 +56,10 @@ const Index = () => {
         <ChatMessages messages={messages} isTyping={isTyping} />
         
         <div className="border-t border-border bg-background/80 p-4 backdrop-blur-sm">
-          <div className="mx-auto max-w-3xl">
+          <div className={cn(
+            "mx-auto transition-all duration-300",
+            sidebarOpen ? "max-w-3xl" : "max-w-4xl"
+          )}>
             <ChatInput onSend={sendMessage} disabled={isTyping} />
             <p className="mt-2 text-center text-xs text-muted-foreground">
               NexusAI can make mistakes. Consider checking important information.

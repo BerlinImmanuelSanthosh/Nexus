@@ -24,15 +24,17 @@ const Sidebar = memo(({
   isOpen,
   onToggle 
 }: SidebarProps) => {
-  const handleOverlayClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleOverlayClick = useCallback(() => {
     onToggle();
   }, [onToggle]);
 
-  const handleNewChat = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleNewChat = useCallback(() => {
     onNew();
   }, [onNew]);
+  
+  const handleToggleClick = useCallback(() => {
+    onToggle();
+  }, [onToggle]);
 
   return (
     <>
@@ -57,10 +59,7 @@ const Sidebar = memo(({
             variant="ghost"
             size="icon"
             className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle();
-            }}
+            onClick={handleToggleClick}
           >
             <PanelLeftClose className="h-4 w-4" />
           </Button>
@@ -68,7 +67,9 @@ const Sidebar = memo(({
 
         <div className="px-3">
           <Button
-            onClick={handleNewChat}
+            onClick={() => {
+              onNew();
+            }}
             className="w-full justify-start gap-2 bg-sidebar-accent text-sidebar-accent-foreground hover:bg-sidebar-accent/80"
           >
             <Plus className="h-4 w-4" />
@@ -112,10 +113,7 @@ const Sidebar = memo(({
           variant="ghost"
           size="icon"
           className="fixed left-4 top-4 z-30 h-10 w-10 bg-secondary/80 backdrop-blur-sm hover:bg-secondary md:absolute"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggle();
-          }}
+          onClick={handleToggleClick}
         >
           <PanelLeft className="h-5 w-5" />
         </Button>
