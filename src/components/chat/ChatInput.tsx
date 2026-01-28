@@ -3,6 +3,14 @@ import { Send, Mic, MicOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+declare global {
+  interface Window {
+    webkitSpeechRecognition: any;
+    SpeechRecognition: any;
+  }
+}
+
+
 
 interface ChatInputProps {
   onSend: (message: string) => void;
@@ -15,13 +23,48 @@ const ChatInput = ({ onSend, disabled }: ChatInputProps) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const recognitionRef = useRef<any>(null);
+  const isListeningRef = useRef(false);
 
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
-    }
-  }, [input]);
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SpeechRecognition) {
+    toast.error('Speech recognition not supported');
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+  recognition.continuous = false;
+
+  recognition.onstart = () => {
+    isListeningRef.current = true;
+    console.log('🎤 Listening started');
+  };
+
+  recognition.onresult = (event: any) => {
+    const transcript = event.results[0][0].transcript;
+    setInput(transcript);
+  };
+
+  recognition.onerror = (event: any) => {
+    console.error('Speech error:', event.error);
+    toast.error(`Voice error: ${event.error}`);
+    isListeningRef.current = false;
+  };
+
+  recognition.onend = () => {
+    isListeningRef.current = false;
+    console.log('🎤 Listening stopped');
+  };
+
+  recognitionRef.current = recognition;
+}, []);
+
+
 
   const handleSubmit = () => {
     if (input.trim() && !disabled) {
@@ -37,64 +80,68 @@ const ChatInput = ({ onSend, disabled }: ChatInputProps) => {
     }
   };
 
-  const handleStartRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100,
-        },
-      });
+  const handleStartRecording = () => {
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
 
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
+  if (!SpeechRecognition) {
+    toast.error('Speech recognition not supported in this browser');
+    return;
+  }
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunksRef.current.push(e.data);
-        }
-      };
+  const recognition = new SpeechRecognition();
+  recognitionRef.current = recognition;
 
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        stream.getTracks().forEach(track => track.stop());
-        
-        // For now, we'll show a toast since we don't have speech-to-text backend
-        toast.info('Voice recording captured! Speech-to-text requires backend integration.');
-        console.log('Audio blob size:', audioBlob.size);
-      };
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+  recognition.continuous = false;
 
-      mediaRecorder.start();
-      setIsRecording(true);
-      toast.success('Recording started...');
-    } catch (error) {
-      if ((error as Error).name === 'NotAllowedError') {
-        toast.error('Microphone access denied. Check browser permissions.');
-      } else {
-        toast.error('Failed to start recording.');
-        console.error('Recording error:', error);
-      }
-    }
+  recognition.onresult = (event) => {
+    const spokenText = event.results[0][0].transcript;
+
+    const improvedPrompt = `Give detailed beginner-friendly notes on ${spokenText}`;
+
+    onSend(improvedPrompt);   // 🔥 SEND TO AI
+    setInput('');
   };
+
+  recognition.onerror = () => {
+    toast.error('Voice recognition failed');
+    setIsRecording(false);
+  };
+
+  recognition.onend = () => {
+    setIsRecording(false);
+  };
+
+  recognition.start();
+  setIsRecording(true);
+  toast.success('Listening...');
+  };
+
 
   const handleStopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      toast.info('Recording stopped.');
-    }
+   recognitionRef.current?.stop();
+   setIsRecording(false);
   };
+  const toggleRecording = () => {
+  if (!recognitionRef.current) {
+    toast.error('Speech recognition not ready');
+    return;
+  }
 
-  const toggleRecording = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (isRecording) {
-      handleStopRecording();
+  try {
+    if (isListeningRef.current) {
+      recognitionRef.current.stop();
     } else {
-      handleStartRecording();
+      recognitionRef.current.start(); // 👈 MUST be here
     }
-  };
+  } catch (err) {
+    console.error(err);
+    toast.error('Voice recognition failed');
+  }
+};
+
 
   return (
     <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-secondary/50 p-2 backdrop-blur-sm transition-all focus-within:border-primary/50 focus-within:glow-primary">
