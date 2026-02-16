@@ -26,11 +26,6 @@ const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
     setExpandedMessage(null);
   }, []);
 
-  const handleNotUnderstand = useCallback((originalMessage: Message) => {
-    // This triggers a re-explanation request - parent could handle this
-    // For now we show a simplified version hint
-    console.log('User did not understand message:', originalMessage.id);
-  }, []);
 
   if (messages.length === 0 && !isTyping) {
     return (
@@ -66,7 +61,6 @@ const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
         <MessageExpandModal
           message={expandedMessage}
           onClose={handleCloseExpand}
-          onNotUnderstand={handleNotUnderstand}
         />
       )}
     </>
