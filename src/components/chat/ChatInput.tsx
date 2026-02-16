@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Mic, MicOff } from 'lucide-react';
+import { Send, Mic, MicOff, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -10,17 +10,17 @@ declare global {
   }
 }
 
-
-
 interface ChatInputProps {
   onSend: (message: string) => void;
+  onFileUpload?: (file: File) => void;
   disabled?: boolean;
 }
 
-const ChatInput = ({ onSend, disabled }: ChatInputProps) => {
+const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
   const [input, setInput] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const recognitionRef = useRef<any>(null);
@@ -143,8 +143,46 @@ const ChatInput = ({ onSend, disabled }: ChatInputProps) => {
 };
 
 
+  const handleFileClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error('Only PDF and image files are supported');
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error('File must be under 20MB');
+      return;
+    }
+    onFileUpload?.(file);
+    toast.success(`Attached: ${file.name}`);
+    e.target.value = '';
+  };
+
   return (
     <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-secondary/50 p-2 backdrop-blur-sm transition-all focus-within:border-primary/50 focus-within:glow-primary">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf,image/*"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+      <Button
+        onClick={handleFileClick}
+        disabled={disabled}
+        size="icon"
+        variant="ghost"
+        className="h-10 w-10 shrink-0 rounded-xl hover:bg-muted text-muted-foreground hover:text-foreground transition-all"
+        title="Attach PDF or image"
+      >
+        <Plus className="h-4 w-4" />
+      </Button>
       <textarea
         ref={textareaRef}
         value={input}
