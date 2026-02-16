@@ -1,7 +1,8 @@
-import { useRef, useEffect, memo } from 'react';
+import { useRef, useEffect, memo, useState, useCallback } from 'react';
 import { Message } from '@/types/chat';
 import MessageBubble from './MessageBubble';
 import ThinkingRobot from './ThinkingRobot';
+import MessageExpandModal from './MessageExpandModal';
 import { Sparkles } from 'lucide-react';
 
 interface ChatMessagesProps {
@@ -11,10 +12,25 @@ interface ChatMessagesProps {
 
 const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [expandedMessage, setExpandedMessage] = useState<Message | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
+
+  const handleExpand = useCallback((message: Message) => {
+    setExpandedMessage(message);
+  }, []);
+
+  const handleCloseExpand = useCallback(() => {
+    setExpandedMessage(null);
+  }, []);
+
+  const handleNotUnderstand = useCallback((originalMessage: Message) => {
+    // This triggers a re-explanation request - parent could handle this
+    // For now we show a simplified version hint
+    console.log('User did not understand message:', originalMessage.id);
+  }, []);
 
   if (messages.length === 0 && !isTyping) {
     return (
@@ -24,26 +40,36 @@ const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
         </div>
         <h2 className="mb-2 text-2xl font-semibold text-foreground">How can I help you today?</h2>
         <p className="max-w-md text-center text-muted-foreground">
-          I'm NexusAI, your intelligent assistant. Ask me anything and I'll do my best to help you.
+          I'm NexusAI, your intelligent study companion. Ask me anything and I'll do my best to help you.
         </p>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 py-6 scrollbar-thin">
-      {messages.map((message) => (
-        <MessageBubble key={message.id} message={message} />
-      ))}
-      {isTyping && (
-        <div className="flex gap-4 animate-fade-in">
-          <div className="rounded-2xl rounded-bl-md bg-chat-ai">
-            <ThinkingRobot />
+    <>
+      <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 py-6 scrollbar-thin">
+        {messages.map((message) => (
+          <MessageBubble key={message.id} message={message} onExpand={handleExpand} />
+        ))}
+        {isTyping && (
+          <div className="flex gap-4 animate-fade-in">
+            <div className="rounded-2xl rounded-bl-md bg-chat-ai">
+              <ThinkingRobot />
+            </div>
           </div>
-        </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {expandedMessage && (
+        <MessageExpandModal
+          message={expandedMessage}
+          onClose={handleCloseExpand}
+          onNotUnderstand={handleNotUnderstand}
+        />
       )}
-      <div ref={bottomRef} />
-    </div>
+    </>
   );
 });
 

@@ -1,49 +1,81 @@
 import { Message } from '@/types/chat';
-import { User, Sparkles } from 'lucide-react';
+import { User, Sparkles, Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useMemo, memo } from 'react';
+import { useMemo, memo, useState, useCallback } from 'react';
 
 interface MessageBubbleProps {
   message: Message;
+  onExpand?: (message: Message) => void;
 }
 
-const MessageBubble = memo(({ message }: MessageBubbleProps) => {
+const MessageBubble = memo(({ message, onExpand }: MessageBubbleProps) => {
   const isUser = message.role === 'user';
+  const [copied, setCopied] = useState(false);
 
-  // Convert **bold** and *italic* to <strong> and <em>
   const formattedContent = useMemo(() => {
     return message.content
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>');
   }, [message.content]);
 
+  const handleCopy = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await navigator.clipboard.writeText(message.content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [message.content]);
+
+  const handleClick = useCallback(() => {
+    onExpand?.(message);
+  }, [message, onExpand]);
+
   return (
-    <div className={cn("flex gap-4 animate-fade-in", isUser ? "justify-end" : "justify-start")}>
-      {!isUser && (
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/20">
-          <Sparkles className="h-4 w-4 text-primary" />
-        </div>
-      )}
-      
+    <div className={cn("flex flex-col gap-1", isUser ? "items-end" : "items-start")}>
       <div
-        className={cn(
-          "max-w-[70%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
-          isUser 
-            ? "bg-chat-user text-foreground rounded-br-md" 
-            : "bg-chat-ai text-foreground rounded-bl-md"
-        )}
+        className={cn("flex gap-4 animate-fade-in cursor-pointer group", isUser ? "justify-end" : "justify-start")}
+        onClick={handleClick}
       >
-        <div 
-          className="whitespace-pre-wrap"
-          dangerouslySetInnerHTML={{ __html: formattedContent }} 
-        />
+        {!isUser && (
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/20">
+            <Sparkles className="h-4 w-4 text-primary" />
+          </div>
+        )}
+
+        <div
+          className={cn(
+            "max-w-[70%] rounded-2xl px-4 py-3 text-sm leading-relaxed transition-all duration-200 group-hover:shadow-lg group-hover:shadow-primary/5",
+            isUser
+              ? "bg-chat-user text-foreground rounded-br-md"
+              : "bg-chat-ai text-foreground rounded-bl-md"
+          )}
+        >
+          <div
+            className="whitespace-pre-wrap"
+            dangerouslySetInnerHTML={{ __html: formattedContent }}
+          />
+        </div>
+
+        {isUser && (
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary">
+            <User className="h-4 w-4 text-secondary-foreground" />
+          </div>
+        )}
       </div>
 
-      {isUser && (
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary">
-          <User className="h-4 w-4 text-secondary-foreground" />
-        </div>
-      )}
+      {/* Copy button */}
+      <div className={cn("px-12", isUser ? "self-end" : "self-start")}>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+          title="Copy message"
+        >
+          {copied ? (
+            <><Check className="h-3 w-3 text-primary" /><span className="text-primary">Copied!</span></>
+          ) : (
+            <><Copy className="h-3 w-3" /><span>Copy</span></>
+          )}
+        </button>
+      </div>
     </div>
   );
 });
