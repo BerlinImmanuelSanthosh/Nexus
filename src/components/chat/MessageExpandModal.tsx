@@ -61,6 +61,11 @@ const MessageExpandModal = memo(({ message, onClose, isReExplanation = false }: 
                 </>
               )}
             </div>
+            {message.imageUrl && !isUser && (
+              <div className="mb-4 overflow-hidden rounded-xl">
+                <img src={message.imageUrl} alt="Related visual" className="w-full h-48 object-cover" loading="lazy" />
+              </div>
+            )}
             <div className="whitespace-pre-wrap text-lg">{message.content}</div>
           </div>
 
