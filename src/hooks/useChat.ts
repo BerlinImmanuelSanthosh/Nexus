@@ -85,11 +85,17 @@ export function useChat() {
       }
 
       const data = await response.json();
+
+      // Generate a related image URL from user's query keywords
+      const keywords = content.split(/\s+/).slice(0, 3).join(',');
+      const imageUrl = `https://source.unsplash.com/800x400/?${encodeURIComponent(keywords)}`;
+
       const aiMessage: Message = {
         id: generateId(),
         content: data.response,
         role: 'assistant',
         timestamp: new Date(),
+        imageUrl,
       };
 
       setConversations(prev => prev.map(c => 

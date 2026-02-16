@@ -49,6 +49,16 @@ const MessageBubble = memo(({ message, onExpand }: MessageBubbleProps) => {
               : "bg-chat-ai text-foreground rounded-bl-md"
           )}
         >
+          {message.imageUrl && !isUser && (
+            <div className="mb-3 overflow-hidden rounded-xl">
+              <img
+                src={message.imageUrl}
+                alt="Related visual"
+                className="w-full h-40 object-cover"
+                loading="lazy"
+              />
+            </div>
+          )}
           <div
             className="whitespace-pre-wrap"
             dangerouslySetInnerHTML={{ __html: formattedContent }}
