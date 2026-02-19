@@ -8,9 +8,10 @@ import { Sparkles } from 'lucide-react';
 interface ChatMessagesProps {
   messages: Message[];
   isTyping: boolean;
+  onTakeTest?: (question: string) => void;
 }
 
-const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
+const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [expandedMessage, setExpandedMessage] = useState<Message | null>(null);
 
@@ -45,7 +46,7 @@ const ChatMessages = memo(({ messages, isTyping }: ChatMessagesProps) => {
     <>
       <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 py-6 scrollbar-thin">
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} onExpand={handleExpand} />
+          <MessageBubble key={message.id} message={message} onExpand={handleExpand} onTakeTest={onTakeTest} />
         ))}
         {isTyping && (
           <div className="flex gap-4 animate-fade-in">
