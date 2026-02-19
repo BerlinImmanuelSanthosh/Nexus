@@ -1,14 +1,15 @@
 import { Message } from '@/types/chat';
-import { User, Sparkles, Copy, Check } from 'lucide-react';
+import { User, Sparkles, Copy, Check, ClipboardList } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useMemo, memo, useState, useCallback } from 'react';
 
 interface MessageBubbleProps {
   message: Message;
   onExpand?: (message: Message) => void;
+  onTakeTest?: (question: string) => void;
 }
 
-const MessageBubble = memo(({ message, onExpand }: MessageBubbleProps) => {
+const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProps) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
 
@@ -28,6 +29,11 @@ const MessageBubble = memo(({ message, onExpand }: MessageBubbleProps) => {
   const handleClick = useCallback(() => {
     onExpand?.(message);
   }, [message, onExpand]);
+
+  const handleTakeTest = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onTakeTest?.(message.content);
+  }, [message.content, onTakeTest]);
 
   return (
     <div className={cn("flex flex-col gap-1", isUser ? "items-end" : "items-start")}>
@@ -72,8 +78,8 @@ const MessageBubble = memo(({ message, onExpand }: MessageBubbleProps) => {
         )}
       </div>
 
-      {/* Copy button */}
-      <div className={cn("px-12", isUser ? "self-end" : "self-start")}>
+      {/* Action buttons */}
+      <div className={cn("flex items-center gap-3 px-12", isUser ? "self-end" : "self-start")}>
         <button
           onClick={handleCopy}
           className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
@@ -85,6 +91,18 @@ const MessageBubble = memo(({ message, onExpand }: MessageBubbleProps) => {
             <><Copy className="h-3 w-3" /><span>Copy</span></>
           )}
         </button>
+
+        {/* Take Test button - only on AI messages */}
+        {!isUser && onTakeTest && (
+          <button
+            onClick={handleTakeTest}
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors py-1"
+            title="Take a test on this topic"
+          >
+            <ClipboardList className="h-3 w-3" />
+            <span>Take Test</span>
+          </button>
+        )}
       </div>
     </div>
   );

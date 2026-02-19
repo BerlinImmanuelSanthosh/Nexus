@@ -1,9 +1,11 @@
-import { Plus, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { Plus, PanelLeftClose, PanelLeft, BrainCircuit, BarChart3, BookPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Conversation } from '@/types/chat';
 import ConversationItem from './ConversationItem';
 import { cn } from '@/lib/utils';
 import { memo, useCallback } from 'react';
+
+type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -13,6 +15,8 @@ interface SidebarProps {
   onDelete: (id: string) => void;
   isOpen: boolean;
   onToggle: () => void;
+  currentView?: ViewType;
+  onViewChange?: (view: ViewType) => void;
 }
 
 const Sidebar = memo(({ 
@@ -22,16 +26,14 @@ const Sidebar = memo(({
   onNew, 
   onDelete,
   isOpen,
-  onToggle 
+  onToggle,
+  currentView = 'chat',
+  onViewChange,
 }: SidebarProps) => {
   const handleOverlayClick = useCallback(() => {
     onToggle();
   }, [onToggle]);
 
-  const handleNewChat = useCallback(() => {
-    onNew();
-  }, [onNew]);
-  
   const handleToggleClick = useCallback(() => {
     onToggle();
   }, [onToggle]);
@@ -64,16 +66,54 @@ const Sidebar = memo(({
           </Button>
         </div>
 
-        <div className="px-3">
+        <div className="px-3 space-y-2">
           <Button
-            onClick={() => {
-              onNew();
-            }}
+            onClick={() => { onNew(); onViewChange?.('chat'); }}
             className="w-full justify-start gap-2 bg-sidebar-accent text-sidebar-accent-foreground hover:bg-sidebar-accent/80"
           >
             <Plus className="h-4 w-4" />
             New Chat
           </Button>
+
+          <Button
+            onClick={() => onViewChange?.('quiz-setup')}
+            variant={currentView === 'quiz-setup' || currentView === 'quiz' || currentView === 'quiz-results' ? 'default' : 'outline'}
+            className={cn(
+              "w-full justify-start gap-2",
+              (currentView === 'quiz-setup' || currentView === 'quiz' || currentView === 'quiz-results')
+                ? "bg-primary text-primary-foreground"
+                : "border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent"
+            )}
+          >
+            <BrainCircuit className="h-4 w-4" />
+            Quiz Mode
+          </Button>
+
+          <Button
+            onClick={() => onViewChange?.('performance')}
+            variant={currentView === 'performance' ? 'default' : 'outline'}
+            className={cn(
+              "w-full justify-start gap-2",
+              currentView === 'performance'
+                ? "bg-primary text-primary-foreground"
+                : "border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent"
+            )}
+          >
+            <BarChart3 className="h-4 w-4" />
+            Performance Tracker
+          </Button>
+
+          {/* New Quiz button - shown when in quiz mode */}
+          {(currentView === 'quiz' || currentView === 'quiz-results') && (
+            <Button
+              onClick={() => onViewChange?.('quiz-setup')}
+              variant="outline"
+              className="w-full justify-start gap-2 border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent"
+            >
+              <BookPlus className="h-4 w-4" />
+              New Quiz
+            </Button>
+          )}
         </div>
 
         <div className="mt-4 flex-1 overflow-y-auto px-3 scrollbar-thin">
@@ -86,8 +126,8 @@ const Sidebar = memo(({
                 <ConversationItem
                   key={conv.id}
                   conversation={conv}
-                  isActive={conv.id === activeId}
-                  onClick={() => onSelect(conv.id)}
+                  isActive={conv.id === activeId && currentView === 'chat'}
+                  onClick={() => { onSelect(conv.id); onViewChange?.('chat'); }}
                   onDelete={() => onDelete(conv.id)}
                 />
               ))
