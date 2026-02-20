@@ -118,8 +118,9 @@ export function useQuiz() {
         const userAnswer = q.type === 'mcq'
           ? (answer?.selectedOption || 'No answer')
           : (answer?.textAnswer || 'No answer');
+        const hasDrawing = q.type === 'written' && !!answer?.canvasData;
         
-        return `Question ${i + 1} (${q.marks} marks): ${q.question}\n${q.options ? `Options: ${q.options.join(', ')}\n` : ''}User's answer: ${userAnswer}`;
+        return `Question ${i + 1} (${q.marks} marks): ${q.question}\n${q.options ? `Options: ${q.options.join(', ')}\n` : ''}User's answer: ${userAnswer}${hasDrawing ? '\n[User also submitted a hand-drawn diagram/working]' : ''}`;
       }).join('\n\n');
 
       const response = await fetch('http://localhost:8000/api/chat', {
