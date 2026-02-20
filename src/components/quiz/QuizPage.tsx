@@ -1,6 +1,7 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { QuizQuestion, QuizAnswer, QuizConfig } from '@/types/quiz';
 import QuizTimer from './QuizTimer';
+import AnswerEditor, { AnswerEditorRef } from './AnswerEditor';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
@@ -26,9 +27,36 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
   const [expandedQuestion, setExpandedQuestion] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
+  // One ref per written question to export canvas+text
+  const editorRefs = useRef<Record<string, AnswerEditorRef | null>>({});
+
   const handleTimeUp = useCallback(() => {
+    // Flush all editor data before submitting
+    questions.forEach(q => {
+      if (q.type === 'written') {
+        const edRef = editorRefs.current[q.id];
+        if (edRef) {
+          const { text, canvasData } = edRef.getExportData();
+          onUpdateAnswer(q.id, { textAnswer: text, canvasData });
+        }
+      }
+    });
     onSubmit();
-  }, [onSubmit]);
+  }, [onSubmit, questions, onUpdateAnswer]);
+
+  const handleSubmitConfirmed = useCallback(() => {
+    // Flush all editor data
+    questions.forEach(q => {
+      if (q.type === 'written') {
+        const edRef = editorRefs.current[q.id];
+        if (edRef) {
+          const { text, canvasData } = edRef.getExportData();
+          onUpdateAnswer(q.id, { textAnswer: text, canvasData });
+        }
+      }
+    });
+    onSubmit();
+  }, [onSubmit, questions, onUpdateAnswer]);
 
   const toggleQuestion = (id: string) => {
     setExpandedQuestion(prev => prev === id ? null : id);
@@ -66,7 +94,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
         {questions.map((q, index) => {
           const answer = answers.find(a => a.questionId === q.id);
           const isExpanded = expandedQuestion === q.id;
-          const hasAnswer = q.type === 'mcq' ? !!answer?.selectedOption : !!answer?.textAnswer;
+          const hasAnswer = q.type === 'mcq' ? !!answer?.selectedOption : !!(answer?.textAnswer || answer?.canvasData);
 
           return (
             <div key={q.id} className="rounded-xl border border-border bg-secondary/30 overflow-hidden transition-all">
@@ -91,7 +119,9 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
                   <p className="text-sm text-foreground">{q.question}</p>
                 </div>
                 {q.type === 'written' && (
-                  isExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+                  isExpanded
+                    ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
+                    : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
                 )}
               </button>
 
@@ -115,25 +145,22 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
                 </div>
               )}
 
-              {/* Written answer - expandable */}
+              {/* Written answer - expandable with smooth transition */}
               {q.type === 'written' && (
-                <div className={cn(
-                  "overflow-hidden transition-all duration-300",
-                  isExpanded ? "max-h-[500px] opacity-100" : "max-h-0 opacity-0"
-                )}>
+                <div
+                  className={cn(
+                    "overflow-hidden transition-all duration-300 ease-in-out",
+                    isExpanded ? "max-h-[700px] opacity-100" : "max-h-0 opacity-0"
+                  )}
+                >
                   <div className="px-4 pb-4">
-                    <textarea
-                      value={answer?.textAnswer || ''}
-                      onChange={e => onUpdateAnswer(q.id, { textAnswer: e.target.value })}
-                      placeholder={`Write your answer here (minimum ${q.marks * 10} words)...`}
-                      className="w-full min-h-[120px] rounded-lg border border-border bg-background px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none resize-y"
+                    <AnswerEditor
+                      ref={(el) => { editorRefs.current[q.id] = el; }}
+                      placeholder={`Type or draw your answer (minimum ${q.marks * 10} words in text mode)...`}
+                      minWords={q.marks * 10}
                       onCopy={config.mode === 'real' ? e => e.preventDefault() : undefined}
                       onPaste={config.mode === 'real' ? e => e.preventDefault() : undefined}
                     />
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {(answer?.textAnswer || '').split(/\s+/).filter(Boolean).length} words
-                    </p>
-                    {/* Drawing canvas placeholder - Phase 2 */}
                   </div>
                 </div>
               )}
@@ -147,7 +174,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
             onClick={() => setShowConfirm(true)}
             className="px-8 h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
           >
-            Done - Submit Quiz
+            Done — Submit Quiz
           </Button>
         </div>
       </div>
@@ -166,7 +193,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowConfirm(false)}>Cancel</Button>
-            <Button onClick={onSubmit} className="bg-primary text-primary-foreground">Yes, Submit</Button>
+            <Button onClick={handleSubmitConfirmed} className="bg-primary text-primary-foreground">Yes, Submit</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
