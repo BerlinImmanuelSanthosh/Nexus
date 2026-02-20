@@ -7,10 +7,17 @@ import { cn } from '@/lib/utils';
 interface QuizSetupProps {
   onStart: (config: QuizConfig) => void;
   onBack: () => void;
+  /** When launched from chat, the AI message becomes the question — subject is auto-filled */
+  chatQuestion?: string | null;
 }
 
-const QuizSetup = ({ onStart, onBack }: QuizSetupProps) => {
-  const [subject, setSubject] = useState('');
+const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
+  // When coming from chat, auto-derive a short subject label from the message
+  const autoSubject = chatQuestion
+    ? chatQuestion.slice(0, 60).replace(/\n/g, ' ').trim()
+    : '';
+
+  const [subject, setSubject] = useState(autoSubject);
   const [questions, setQuestions] = useState<QuestionConfig[]>([{ marks: 1, count: 5 }]);
   const [timeHours, setTimeHours] = useState(0);
   const [timeMinutes, setTimeMinutes] = useState(30);
@@ -32,9 +39,10 @@ const QuizSetup = ({ onStart, onBack }: QuizSetupProps) => {
   };
 
   const handleStart = () => {
-    if (!subject.trim()) return;
+    const effectiveSubject = chatQuestion ? autoSubject : subject;
+    if (!effectiveSubject.trim()) return;
     if (timeHours === 0 && timeMinutes === 0) return;
-    onStart({ subject, questions, timeHours, timeMinutes, mode });
+    onStart({ subject: effectiveSubject, questions, timeHours, timeMinutes, mode });
   };
 
   return (
@@ -50,66 +58,98 @@ const QuizSetup = ({ onStart, onBack }: QuizSetupProps) => {
           </div>
         </div>
 
-        {/* Subject */}
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-foreground flex items-center gap-2">
-            <BookOpen className="h-4 w-4 text-primary" />
-            Subject
-          </label>
-          <input
-            type="text"
-            value={subject}
-            onChange={e => setSubject(e.target.value)}
-            placeholder="e.g. Physics, Mathematics, History..."
-            className="w-full rounded-xl border border-border bg-secondary/50 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
-          />
-        </div>
-
-        {/* Questions */}
-        <div className="space-y-3">
-          <label className="text-sm font-medium text-foreground">Questions</label>
-          {questions.map((q, i) => (
-            <div key={i} className="flex items-center gap-3 rounded-xl border border-border bg-secondary/30 p-3">
-              <div className="flex-1 space-y-1">
-                <div className="flex gap-3">
-                  <div className="flex-1">
-                    <label className="text-xs text-muted-foreground">Marks each</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={20}
-                      value={q.marks}
-                      onChange={e => updateQuestion(i, 'marks', parseInt(e.target.value) || 1)}
-                      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary/50 focus:outline-none"
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="text-xs text-muted-foreground">No. of questions</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={q.count}
-                      onChange={e => updateQuestion(i, 'count', parseInt(e.target.value) || 1)}
-                      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary/50 focus:outline-none"
-                    />
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {q.marks === 1 ? '4 choices (MCQ)' : `Written answer (min ${q.marks * 10} words)`}
-                </p>
-              </div>
-              {questions.length > 1 && (
-                <Button variant="ghost" size="icon" onClick={() => removeQuestionType(i)} className="shrink-0 text-destructive hover:text-destructive">
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              )}
+        {/* Subject — hidden when coming from chat (auto-filled) */}
+        {chatQuestion ? (
+          <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <BookOpen className="h-4 w-4 text-primary" />
+              <span className="text-sm font-medium text-foreground">Question from chat</span>
             </div>
-          ))}
-          <Button variant="outline" onClick={addQuestionType} className="w-full gap-2">
-            <Plus className="h-4 w-4" /> Add Question Type
-          </Button>
-        </div>
+            <p className="text-sm text-muted-foreground line-clamp-3">{chatQuestion}</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-foreground flex items-center gap-2">
+              <BookOpen className="h-4 w-4 text-primary" />
+              Subject
+            </label>
+            <input
+              type="text"
+              value={subject}
+              onChange={e => setSubject(e.target.value)}
+              placeholder="e.g. Physics, Mathematics, History..."
+              className="w-full rounded-xl border border-border bg-secondary/50 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
+            />
+          </div>
+        )}
+
+        {/* Questions config — if from chat, only ask for marks */}
+        {chatQuestion ? (
+          <div className="space-y-3">
+            <label className="text-sm font-medium text-foreground">Marks for this question</label>
+            <div className="flex items-center gap-3 rounded-xl border border-border bg-secondary/30 p-3">
+              <div className="flex-1">
+                <label className="text-xs text-muted-foreground">Marks</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={questions[0]?.marks ?? 2}
+                  onChange={e => setQuestions([{ marks: parseInt(e.target.value) || 1, count: 1 }])}
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary/50 focus:outline-none"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground flex-1">
+                {questions[0]?.marks === 1 ? '4 choices (MCQ)' : `Written answer (min ${(questions[0]?.marks ?? 2) * 10} words)`}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <label className="text-sm font-medium text-foreground">Questions</label>
+            {questions.map((q, i) => (
+              <div key={i} className="flex items-center gap-3 rounded-xl border border-border bg-secondary/30 p-3">
+                <div className="flex-1 space-y-1">
+                  <div className="flex gap-3">
+                    <div className="flex-1">
+                      <label className="text-xs text-muted-foreground">Marks each</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={q.marks}
+                        onChange={e => updateQuestion(i, 'marks', parseInt(e.target.value) || 1)}
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary/50 focus:outline-none"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="text-xs text-muted-foreground">No. of questions</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={q.count}
+                        onChange={e => updateQuestion(i, 'count', parseInt(e.target.value) || 1)}
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary/50 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {q.marks === 1 ? '4 choices (MCQ)' : `Written answer (min ${q.marks * 10} words)`}
+                  </p>
+                </div>
+                {questions.length > 1 && (
+                  <Button variant="ghost" size="icon" onClick={() => removeQuestionType(i)} className="shrink-0 text-destructive hover:text-destructive">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
+            ))}
+            <Button variant="outline" onClick={addQuestionType} className="w-full gap-2">
+              <Plus className="h-4 w-4" /> Add Question Type
+            </Button>
+          </div>
+        )}
 
         {/* Total Marks */}
         <div className="rounded-xl border border-primary/30 bg-primary/5 p-4 text-center">
@@ -183,7 +223,7 @@ const QuizSetup = ({ onStart, onBack }: QuizSetupProps) => {
         {/* Start Button */}
         <Button
           onClick={handleStart}
-          disabled={!subject.trim() || (timeHours === 0 && timeMinutes === 0)}
+          disabled={(chatQuestion ? false : !subject.trim()) || (timeHours === 0 && timeMinutes === 0)}
           className="w-full h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
         >
           Confirm & Start Test
