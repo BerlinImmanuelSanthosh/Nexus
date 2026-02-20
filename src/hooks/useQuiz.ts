@@ -12,9 +12,22 @@ export function useQuiz() {
   } | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
-  const generateQuestions = useCallback(async (config: QuizConfig): Promise<QuizQuestion[]> => {
+  const generateQuestions = useCallback(async (config: QuizConfig, overrideQuestion?: string): Promise<QuizQuestion[]> => {
     setIsGenerating(true);
     try {
+      // If a specific question is passed (from chat), skip generation
+      if (overrideQuestion) {
+        const marks = config.questions[0]?.marks ?? 2;
+        const q: QuizQuestion = {
+          id: generateId(),
+          question: overrideQuestion,
+          marks,
+          type: marks === 1 ? 'mcq' : 'written',
+          options: marks === 1 ? ['A) Option 1', 'B) Option 2', 'C) Option 3', 'D) Option 4'] : undefined,
+        };
+        return [q];
+      }
+
       const allQuestions: QuizQuestion[] = [];
       
       for (const qConfig of config.questions) {
@@ -88,8 +101,8 @@ export function useQuiz() {
     }
   }, []);
 
-  const startQuiz = useCallback(async (config: QuizConfig) => {
-    const questions = await generateQuestions(config);
+  const startQuiz = useCallback(async (config: QuizConfig, overrideQuestion?: string) => {
+    const questions = await generateQuestions(config, overrideQuestion);
     const answers: QuizAnswer[] = questions.map(q => ({ questionId: q.id }));
     setCurrentQuiz({ config, questions, answers });
     return questions;

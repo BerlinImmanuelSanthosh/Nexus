@@ -22,6 +22,7 @@ const Index = () => {
   const [showIntro, setShowIntro] = useState(true);
   const [currentView, setCurrentView] = useState<ViewType>('chat');
   const [latestResult, setLatestResult] = useState<QuizResult | null>(null);
+  const [chatQuestion, setChatQuestion] = useState<string | null>(null);
 
   const {
     conversations,
@@ -47,9 +48,10 @@ const Index = () => {
   const handleToggleSidebar = useCallback(() => setSidebarOpen(prev => !prev), []);
 
   const handleStartQuiz = useCallback(async (config: QuizConfig) => {
-    await startQuiz(config);
+    await startQuiz(config, chatQuestion ?? undefined);
+    setChatQuestion(null);
     setCurrentView('quiz');
-  }, [startQuiz]);
+  }, [startQuiz, chatQuestion]);
 
   const handleSubmitQuiz = useCallback(async () => {
     const result = await evaluateQuiz();
@@ -64,7 +66,7 @@ const Index = () => {
   }, []);
 
   const handleTakeTestFromChat = useCallback((question: string) => {
-    // Go to quiz setup but pre-fill with the question context
+    setChatQuestion(question);
     setCurrentView('quiz-setup');
   }, []);
 
@@ -75,7 +77,7 @@ const Index = () => {
   const renderContent = () => {
     switch (currentView) {
       case 'quiz-setup':
-        return <QuizSetup onStart={handleStartQuiz} onBack={() => setCurrentView('chat')} />;
+        return <QuizSetup onStart={handleStartQuiz} onBack={() => { setCurrentView('chat'); setChatQuestion(null); }} chatQuestion={chatQuestion} />;
       
       case 'quiz':
         if (isGenerating) {
