@@ -145,7 +145,11 @@ const DrawBlock = ({
   // Selection state
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const editingTextIdRef = useRef<string | null>(null);
   const dragState = useRef<{ mode: 'move' | 'resize'; handle?: ResizeHandle; origBounds: { x: number; y: number; w: number; h: number }; origStroke: DrawStroke; startX: number; startY: number } | null>(null);
+
+  // Keep ref in sync for use in drawAll
+  useEffect(() => { editingTextIdRef.current = editingTextId; }, [editingTextId]);
 
   useEffect(() => { strokesRef.current = block.strokes; }, [block.strokes]);
 
@@ -207,7 +211,8 @@ const DrawBlock = ({
         ctx.strokeRect(s.x!, s.y!, s.w, s.h!);
         ctx.setLineDash([]);
         // Draw text content
-        if (s.textContent) {
+        // Only render text on canvas if NOT currently editing this stroke (prevents mirror/double text)
+        if (s.textContent && s.id !== editingTextIdRef.current) {
           const words = s.textContent.split('\n');
           const fs = s.fontSize || 16;
           words.forEach((line, i) => {
@@ -216,6 +221,7 @@ const DrawBlock = ({
         }
       }
 
+      // Skip rendering text content on canvas if currently editing it (prevents mirror effect)
       // Selection box
       if (selId === s.id) {
         const b = getBounds(s);
@@ -258,7 +264,7 @@ const DrawBlock = ({
           if (b) {
             const handle = hitHandle(b, pos.x, pos.y);
             if (handle) {
-              dragState.current = { mode: 'resize', handle, origBounds: { ...b }, origStroke: { ...sel }, startX: pos.x, startY: pos.y };
+              dragState.current = { mode: 'resize', handle, origBounds: { ...b }, origStroke: JSON.parse(JSON.stringify(sel)), startX: pos.x, startY: pos.y };
               isDrawing.current = true;
               return;
             }

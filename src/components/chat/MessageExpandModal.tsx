@@ -12,6 +12,8 @@ interface MessageExpandModalProps {
 const MessageExpandModal = memo(({ message, onClose, isReExplanation = false }: MessageExpandModalProps) => {
   const [showRobotDialog, setShowRobotDialog] = useState(true);
   const [showReExplain, setShowReExplain] = useState(false);
+  const [reExplainContent, setReExplainContent] = useState<string>('');
+  const [isLoadingReExplain, setIsLoadingReExplain] = useState(false);
   const isUser = message.role === 'user';
 
   const handleBackdropClick = useCallback((e: React.MouseEvent) => {
@@ -24,13 +26,32 @@ const MessageExpandModal = memo(({ message, onClose, isReExplanation = false }: 
     onClose();
   }, [onClose]);
 
-  const handleNo = useCallback(() => {
+  const handleNo = useCallback(async () => {
     setShowRobotDialog(false);
     setShowReExplain(true);
-  }, []);
-
-  // Re-explanation content: simplified version of the message
-  const reExplainContent = `Here's a simpler explanation:\n\n${message.content}`;
+    setIsLoadingReExplain(true);
+    try {
+      const response = await fetch('http://localhost:8000/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: message.content },
+            { role: 'assistant', content: message.content },
+            { role: 'user', content: 'I did not understand. Please explain it like I am 5 years old, in very simple words.' },
+          ],
+          mode: 'five_year_old',
+        }),
+      });
+      if (!response.ok) throw new Error('Failed');
+      const data = await response.json();
+      setReExplainContent(data.response);
+    } catch {
+      setReExplainContent(`Here's a simpler explanation:\n\n${message.content}`);
+    } finally {
+      setIsLoadingReExplain(false);
+    }
+  }, [message.content]);
 
   return (
     <div
@@ -103,7 +124,14 @@ const MessageExpandModal = memo(({ message, onClose, isReExplanation = false }: 
               </div>
               <span className="text-sm font-medium text-muted-foreground">NexusAI</span>
             </div>
-            <div className="whitespace-pre-wrap text-lg">{reExplainContent}</div>
+            <div className="whitespace-pre-wrap text-lg">
+              {isLoadingReExplain ? (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <div className="h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                  Thinking of a simpler way to explain…
+                </div>
+              ) : reExplainContent}
+            </div>
           </div>
 
           {/* Robot says hope you understood */}
