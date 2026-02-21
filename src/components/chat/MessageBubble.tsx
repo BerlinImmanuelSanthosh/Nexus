@@ -26,9 +26,16 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
     setTimeout(() => setCopied(false), 2000);
   }, [message.content]);
 
+  const isGreeting = useMemo(() => {
+    const greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'howdy', 'greetings', 'how can i help', 'how may i help', 'welcome'];
+    const lower = message.content.toLowerCase().trim();
+    return greetings.some(g => lower.startsWith(g)) && lower.length < 120;
+  }, [message.content]);
+
   const handleClick = useCallback(() => {
+    if (isGreeting) return;
     onExpand?.(message);
-  }, [message, onExpand]);
+  }, [message, onExpand, isGreeting]);
 
   const handleTakeTest = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -38,7 +45,7 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
   return (
     <div className={cn("flex flex-col gap-1", isUser ? "items-end" : "items-start")}>
       <div
-        className={cn("flex gap-4 animate-fade-in cursor-pointer group", isUser ? "justify-end" : "justify-start")}
+        className={cn("flex gap-4 animate-fade-in group", isUser ? "justify-end" : "justify-start", isGreeting ? "cursor-default" : "cursor-pointer")}
         onClick={handleClick}
       >
         {!isUser && (
