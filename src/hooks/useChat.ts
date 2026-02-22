@@ -33,7 +33,6 @@ export function useChat() {
   const sendMessage = useCallback(async (content: string) => {
     let conversationId = activeConversationId;
 
-    // Create new conversation if none exists
     if (!conversationId) {
       const newConversation: Conversation = {
         id: generateId(),
@@ -54,9 +53,8 @@ export function useChat() {
       timestamp: new Date(),
     };
 
-    // Add user message
-    setConversations(prev => prev.map(c => 
-      c.id === conversationId 
+    setConversations(prev => prev.map(c =>
+      c.id === conversationId
         ? { ...c, messages: [...c.messages, userMessage], updatedAt: new Date() }
         : c
     ));
@@ -64,20 +62,35 @@ export function useChat() {
     setIsTyping(true);
 
     try {
-      // Get current messages for the conversation
       const currentConversation = conversations.find(c => c.id === conversationId);
-      const messagesForBackend = [...(currentConversation?.messages || []), userMessage]
-        .map(msg => ({ 
-          role: msg.role, 
-          content: msg.content 
-        }));
+
+      // 🔥 KEY FIX: Detect click re-explain trigger
+      const isReExplain = content.toLowerCase().includes('reexplain');
+
+      let messagesForBackend;
+
+      if (isReExplain && currentConversation) {
+        const firstUserMessage = currentConversation.messages.find(m => m.role === 'user');
+        messagesForBackend = firstUserMessage
+          ? [{ role: 'user', content: firstUserMessage.content }]
+          : [{ role: 'user', content }];
+      } else {
+        messagesForBackend = [...(currentConversation?.messages || []), userMessage]
+          .map(msg => ({
+            role: msg.role,
+            content: msg.content
+          }));
+      }
 
       const response = await fetch('http://localhost:8000/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ messages: messagesForBackend, mode: 'simple_english' }),
+        body: JSON.stringify({
+          messages: messagesForBackend,
+          mode: 'simple_english'
+        }),
       });
 
       if (!response.ok) {
@@ -86,8 +99,13 @@ export function useChat() {
 
       const data = await response.json();
 
-      // Generate a related image from query keywords using Unsplash
-      const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
+      // Generate a related image from query keywords
+      const keywords = content
+        .split(/\s+/)
+        .filter(w => w.length > 2)
+        .slice(0, 3)
+        .join('+');
+
       const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
 
       const aiMessage: Message = {
@@ -98,21 +116,24 @@ export function useChat() {
         imageUrl,
       };
 
-      setConversations(prev => prev.map(c => 
-        c.id === conversationId 
+      setConversations(prev => prev.map(c =>
+        c.id === conversationId
           ? { ...c, messages: [...c.messages, aiMessage], updatedAt: new Date() }
           : c
       ));
+
     } catch (error) {
       console.error('Chat error:', error);
+
       const errorMessage: Message = {
         id: generateId(),
         content: 'Failed to get a response. Is the backend running?',
         role: 'assistant',
         timestamp: new Date(),
       };
-      setConversations(prev => prev.map(c => 
-        c.id === conversationId 
+
+      setConversations(prev => prev.map(c =>
+        c.id === conversationId
           ? { ...c, messages: [...c.messages, errorMessage], updatedAt: new Date() }
           : c
       ));

@@ -20,11 +20,29 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
   }, [message.content]);
 
   const handleCopy = useCallback(async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    await navigator.clipboard.writeText(message.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }, [message.content]);
+  e.stopPropagation();
+
+  if (!message.content) return;
+
+  // Convert the already formatted HTML to plain text
+  const tempDiv = document.createElement('div');
+  tempDiv.innerHTML = formattedContent;
+
+  const plainText = tempDiv.innerText;
+
+  // Remove everything starting from timetable intro
+  const cutoffRegex =
+    /Here is a .*study schedule[\s\S]*/i;
+
+  const cleanedText = plainText
+    .replace(cutoffRegex, '')
+    .trim();
+
+  await navigator.clipboard.writeText(cleanedText);
+
+  setCopied(true);
+  setTimeout(() => setCopied(false), 2000);
+}, [formattedContent, message.content]);
 
   const isGreeting = useMemo(() => {
     const greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'howdy', 'greetings', 'how can i help', 'how may i help', 'welcome', 'what can i do', 'how are you'];
@@ -68,7 +86,7 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
             <div className="mb-3 overflow-hidden rounded-xl">
               <img
                 src={message.imageUrl}
-                alt="Related visual"
+                alt=""
                 className="w-full h-40 object-cover"
                 loading="lazy"
               />
