@@ -4,6 +4,10 @@ import { QuizConfig, QuestionConfig } from '@/types/quiz';
 import { ArrowLeft, Plus, Trash2, Clock, BookOpen, Upload, FileText, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Set worker source
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
 interface QuizSetupProps {
   onStart: (config: QuizConfig) => void;
@@ -64,8 +68,28 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
 
     setIsExtracting(true);
     try {
-      const text = await file.text();
-      const cleaned = text.replace(/\s+/g, ' ').trim().slice(0, 5000);
+      let extractedText = '';
+
+      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        // Use pdf.js for proper PDF text extraction
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const pages: string[] = [];
+        for (let i = 1; i <= Math.min(pdf.numPages, 50); i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items
+            .map((item: any) => item.str)
+            .join(' ');
+          pages.push(pageText);
+        }
+        extractedText = pages.join('\n\n');
+      } else {
+        // Plain text / doc files
+        extractedText = await file.text();
+      }
+
+      const cleaned = extractedText.replace(/\s+/g, ' ').trim().slice(0, 8000);
       if (cleaned.length < 10) {
         toast.error('Could not extract meaningful text from the file');
         return;
@@ -75,7 +99,8 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         setSubject(file.name.replace(/\.[^.]+$/, '').slice(0, 60));
       }
       toast.success(`Extracted text from ${file.name}`);
-    } catch {
+    } catch (err) {
+      console.error('File extraction error:', err);
       toast.error('Failed to read file');
     } finally {
       setIsExtracting(false);

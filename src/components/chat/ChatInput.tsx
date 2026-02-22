@@ -161,69 +161,82 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
   };
 
   return (
-    <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-secondary/50 p-2 backdrop-blur-sm transition-all focus-within:border-primary/50 focus-within:glow-primary">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".pdf,image/*"
-        onChange={handleFileChange}
-        className="hidden"
-      />
-      <Button
-        onClick={handleFileClick}
-        disabled={disabled}
-        size="icon"
-        variant="ghost"
-        className="h-10 w-10 shrink-0 rounded-xl hover:bg-muted text-muted-foreground hover:text-foreground transition-all"
-        title="Attach PDF or image"
-      >
-        <Plus className="h-4 w-4" />
-      </Button>
-      <textarea
-        ref={textareaRef}
-        value={input}
-        onChange={(e) => {
-          setInput(e.target.value);
-          // Auto-resize textarea
-          const ta = textareaRef.current;
-          if (ta) {
-            ta.style.height = 'auto';
-            ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
-          }
-        }}
-        onKeyDown={handleKeyDown}
-        placeholder="Message NexusAI..."
-        disabled={disabled}
-        rows={1}
-        className="max-h-[160px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 transition-[height] duration-150"
-      />
-      <Button
-        onClick={toggleRecording}
-        disabled={disabled}
-        size="icon"
-        variant="ghost"
-        className={cn(
-          "h-10 w-10 shrink-0 rounded-xl transition-all",
-          isRecording 
-            ? "bg-destructive text-destructive-foreground animate-pulse" 
-            : "hover:bg-muted text-muted-foreground hover:text-foreground"
-        )}
-      >
-        {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-      </Button>
-      <Button
-        onClick={handleSubmit}
-        disabled={!input.trim() || disabled}
-        size="icon"
-        className={cn(
-          "h-10 w-10 shrink-0 rounded-xl transition-all",
-          input.trim() 
-            ? "bg-primary text-primary-foreground hover:bg-primary/90" 
-            : "bg-muted text-muted-foreground"
-        )}
-      >
-        <Send className="h-4 w-4" />
-      </Button>
+    <div className="relative">
+      {/* Mic recording indicator */}
+      {isRecording && (
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-destructive/10 border border-destructive/30 animate-fade-in">
+          <div className="h-2.5 w-2.5 rounded-full bg-destructive animate-pulse" />
+          <span className="text-xs font-medium text-destructive">Listening… speak now</span>
+          <div className="flex gap-0.5 ml-auto">
+            {[1,2,3,4,5].map(i => (
+              <div key={i} className="w-1 bg-destructive/60 rounded-full animate-pulse" style={{ height: `${8 + Math.random() * 12}px`, animationDelay: `${i * 0.1}s` }} />
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="flex items-end gap-2 rounded-2xl border border-border bg-secondary/50 p-2 backdrop-blur-sm transition-all focus-within:border-primary/50 focus-within:glow-primary">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,image/*"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+        <Button
+          onClick={handleFileClick}
+          disabled={disabled}
+          size="icon"
+          variant="ghost"
+          className="h-10 w-10 shrink-0 rounded-xl hover:bg-muted text-muted-foreground hover:text-foreground transition-all"
+          title="Attach PDF or image"
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            const ta = textareaRef.current;
+            if (ta) {
+              ta.style.height = 'auto';
+              ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+            }
+          }}
+          onKeyDown={handleKeyDown}
+          placeholder="Message NexusAI..."
+          disabled={disabled}
+          rows={1}
+          className="max-h-[160px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 transition-[height] duration-150"
+        />
+        <Button
+          onClick={toggleRecording}
+          disabled={disabled}
+          size="icon"
+          variant="ghost"
+          className={cn(
+            "h-10 w-10 shrink-0 rounded-xl transition-all",
+            isRecording 
+              ? "bg-destructive text-destructive-foreground animate-pulse" 
+              : "hover:bg-muted text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+        </Button>
+        <Button
+          onClick={handleSubmit}
+          disabled={!input.trim() || disabled}
+          size="icon"
+          className={cn(
+            "h-10 w-10 shrink-0 rounded-xl transition-all",
+            input.trim() 
+              ? "bg-primary text-primary-foreground hover:bg-primary/90" 
+              : "bg-muted text-muted-foreground"
+          )}
+        >
+          <Send className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   );
 };
