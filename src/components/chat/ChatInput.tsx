@@ -98,11 +98,7 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
 
   recognition.onresult = (event) => {
     const spokenText = event.results[0][0].transcript;
-
-    const improvedPrompt = `Give detailed beginner-friendly notes on ${spokenText}`;
-
-    onSend(improvedPrompt);   // 🔥 SEND TO AI
-    setInput('');
+    setInput(prev => prev ? prev + ' ' + spokenText : spokenText);
   };
 
   recognition.onerror = () => {
@@ -186,12 +182,20 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
       <textarea
         ref={textareaRef}
         value={input}
-        onChange={(e) => setInput(e.target.value)}
+        onChange={(e) => {
+          setInput(e.target.value);
+          // Auto-resize textarea
+          const ta = textareaRef.current;
+          if (ta) {
+            ta.style.height = 'auto';
+            ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+          }
+        }}
         onKeyDown={handleKeyDown}
         placeholder="Message NexusAI..."
         disabled={disabled}
         rows={1}
-        className="max-h-[200px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
+        className="max-h-[160px] min-h-[44px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 transition-[height] duration-150"
       />
       <Button
         onClick={toggleRecording}

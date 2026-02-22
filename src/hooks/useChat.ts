@@ -72,12 +72,31 @@ export function useChat() {
           content: msg.content 
         }));
 
+      // Generate a related image URL from user's query keywords and show it first
+      const keywords = content.split(/\s+/).slice(0, 3).join(',');
+      const imageUrl = `https://source.unsplash.com/800x400/?${encodeURIComponent(keywords)}`;
+
+      // Show image placeholder message immediately while waiting for text
+      const placeholderMessageId = generateId();
+      const placeholderMessage: Message = {
+        id: placeholderMessageId,
+        content: '',
+        role: 'assistant',
+        timestamp: new Date(),
+        imageUrl,
+      };
+      setConversations(prev => prev.map(c =>
+        c.id === conversationId
+          ? { ...c, messages: [...c.messages, placeholderMessage], updatedAt: new Date() }
+          : c
+      ));
+
       const response = await fetch('http://localhost:8000/api/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ messages: messagesForBackend }),
+        body: JSON.stringify({ messages: messagesForBackend, mode: 'simple_english' }),
       });
 
       if (!response.ok) {
@@ -86,21 +105,18 @@ export function useChat() {
 
       const data = await response.json();
 
-      // Generate a related image URL from user's query keywords
-      const keywords = content.split(/\s+/).slice(0, 3).join(',');
-      const imageUrl = `https://source.unsplash.com/800x400/?${encodeURIComponent(keywords)}`;
-
-      const aiMessage: Message = {
-        id: generateId(),
-        content: data.response,
-        role: 'assistant',
-        timestamp: new Date(),
-        imageUrl,
-      };
-
-      setConversations(prev => prev.map(c => 
-        c.id === conversationId 
-          ? { ...c, messages: [...c.messages, aiMessage], updatedAt: new Date() }
+      // Update the placeholder message with the actual text response
+      setConversations(prev => prev.map(c =>
+        c.id === conversationId
+          ? {
+              ...c,
+              messages: c.messages.map(m =>
+                m.id === placeholderMessageId
+                  ? { ...m, content: data.response }
+                  : m
+              ),
+              updatedAt: new Date(),
+            }
           : c
       ));
     } catch (error) {
