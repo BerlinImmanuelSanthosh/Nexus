@@ -27,9 +27,11 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
   }, [message.content]);
 
   const isGreeting = useMemo(() => {
-    const greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'howdy', 'greetings', 'how can i help', 'how may i help', 'welcome'];
+    const greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'howdy', 'greetings', 'how can i help', 'how may i help', 'welcome', 'what can i do', 'how are you'];
     const lower = message.content.toLowerCase().trim();
-    return greetings.some(g => lower.startsWith(g)) && lower.length < 120;
+    // Check both user greetings and AI greeting responses
+    return (greetings.some(g => lower.startsWith(g)) && lower.length < 150) || 
+           (lower.includes('how can i help') || lower.includes('how may i assist'));
   }, [message.content]);
 
   const handleClick = useCallback(() => {
@@ -99,8 +101,8 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
           )}
         </button>
 
-        {/* Take Test button - only on AI messages */}
-        {!isUser && onTakeTest && (
+        {/* Take Test button - only on non-greeting AI messages */}
+        {!isUser && !isGreeting && onTakeTest && (
           <button
             onClick={handleTakeTest}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors py-1"

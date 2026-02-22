@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { QuizConfig, QuestionConfig } from '@/types/quiz';
-import { ArrowLeft, Plus, Trash2, Clock, BookOpen } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Clock, BookOpen, Upload, FileText, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
 interface QuizSetupProps {
   onStart: (config: QuizConfig) => void;
@@ -22,6 +23,9 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
   const [timeHours, setTimeHours] = useState(0);
   const [timeMinutes, setTimeMinutes] = useState(30);
   const [mode, setMode] = useState<'normal' | 'real'>('normal');
+  const [attachedFile, setAttachedFile] = useState<{ name: string; text: string } | null>(null);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const totalMarks = questions.reduce((sum, q) => sum + q.marks * q.count, 0);
   const totalQuestions = questions.reduce((sum, q) => sum + q.count, 0);
@@ -38,8 +42,48 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
     setQuestions(prev => prev.map((q, i) => i === index ? { ...q, [field]: value } : q));
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    const allowedTypes = [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain',
+    ];
+    if (!allowedTypes.includes(file.type) && !file.name.match(/\.(txt|pdf|doc|docx)$/i)) {
+      toast.error('Only PDF, Word, or text files are supported');
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error('File must be under 20MB');
+      return;
+    }
+
+    setIsExtracting(true);
+    try {
+      const text = await file.text();
+      const cleaned = text.replace(/\s+/g, ' ').trim().slice(0, 5000);
+      if (cleaned.length < 10) {
+        toast.error('Could not extract meaningful text from the file');
+        return;
+      }
+      setAttachedFile({ name: file.name, text: cleaned });
+      if (!subject.trim()) {
+        setSubject(file.name.replace(/\.[^.]+$/, '').slice(0, 60));
+      }
+      toast.success(`Extracted text from ${file.name}`);
+    } catch {
+      toast.error('Failed to read file');
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
   const handleStart = () => {
-    const effectiveSubject = chatQuestion ? autoSubject : subject;
+    const effectiveSubject = chatQuestion ? autoSubject : (attachedFile ? attachedFile.text : subject);
     if (!effectiveSubject.trim()) return;
     if (timeHours === 0 && timeMinutes === 0) return;
     onStart({ subject: effectiveSubject, questions, timeHours, timeMinutes, mode });
@@ -80,6 +124,38 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
               placeholder="e.g. Physics, Mathematics, History..."
               className="w-full rounded-xl border border-border bg-secondary/50 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
             />
+            
+            {/* File attachment */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.doc,.docx,.txt"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+            {attachedFile ? (
+              <div className="flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3">
+                <FileText className="h-4 w-4 text-primary shrink-0" />
+                <span className="text-sm text-foreground flex-1 truncate">{attachedFile.name}</span>
+                <button onClick={() => setAttachedFile(null)} className="text-muted-foreground hover:text-foreground">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isExtracting}
+                className="w-full gap-2 rounded-xl"
+              >
+                {isExtracting ? (
+                  <><div className="h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" /> Extracting...</>
+                ) : (
+                  <><Upload className="h-4 w-4" /> Or upload a file (PDF, Word, TXT)</>
+                )}
+              </Button>
+            )}
+            <p className="text-xs text-muted-foreground">Type a subject or upload a document — questions will be generated from the content</p>
           </div>
         )}
 
@@ -223,7 +299,7 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         {/* Start Button */}
         <Button
           onClick={handleStart}
-          disabled={(chatQuestion ? false : !subject.trim()) || (timeHours === 0 && timeMinutes === 0)}
+          disabled={(chatQuestion ? false : (!subject.trim() && !attachedFile)) || (timeHours === 0 && timeMinutes === 0)}
           className="w-full h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
         >
           Confirm & Start Test
