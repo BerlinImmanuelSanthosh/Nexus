@@ -77,7 +77,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
   }, [config.mode]);
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex flex-1 flex-col overflow-hidden h-full">
       {/* Header with timer */}
       <div className="flex items-center justify-between border-b border-border bg-background/80 px-6 py-3 backdrop-blur-sm">
         <div>
@@ -90,7 +90,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
       </div>
 
       {/* Questions */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 scrollbar-thin">
+      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4" style={{ minHeight: 0 }}>
         {questions.map((q, index) => {
           const answer = answers.find(a => a.questionId === q.id);
           const isExpanded = expandedQuestion === q.id;
@@ -150,8 +150,9 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
                 <div
                   className={cn(
                     "overflow-hidden transition-all duration-300 ease-in-out",
-                    isExpanded ? "max-h-[700px] opacity-100" : "max-h-0 opacity-0"
+                    isExpanded ? "opacity-100" : "max-h-0 opacity-0"
                   )}
+                  style={isExpanded ? { maxHeight: '2000px' } : undefined}
                 >
                   <div className="px-4 pb-4">
                     <AnswerEditor
