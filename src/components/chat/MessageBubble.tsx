@@ -1,5 +1,5 @@
 import { Message } from '@/types/chat';
-import { User, Sparkles, Copy, Check, ClipboardList } from 'lucide-react';
+import { User, Sparkles, Copy, Check, ClipboardList, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useMemo, memo, useState, useCallback } from 'react';
 
@@ -12,6 +12,7 @@ interface MessageBubbleProps {
 const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProps) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
+  const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
 
   const formattedContent = useMemo(() => {
     return message.content
@@ -63,6 +64,15 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
   }, [message.content, onTakeTest]);
 
   return (
+    <>
+    {enlargedImage && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in" onClick={() => setEnlargedImage(null)}>
+        <button className="absolute top-4 right-4 text-white/80 hover:text-white" onClick={() => setEnlargedImage(null)}>
+          <X className="h-6 w-6" />
+        </button>
+        <img src={enlargedImage} alt="" className="max-w-[90vw] max-h-[90vh] rounded-xl object-contain shadow-2xl animate-scale-in" />
+      </div>
+    )}
     <div className={cn("flex flex-col gap-1", isUser ? "items-end" : "items-start")}>
       <div
         className={cn("flex gap-4 animate-fade-in group", isUser ? "justify-end" : "justify-start", isGreeting ? "cursor-default" : "cursor-pointer")}
@@ -83,11 +93,11 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
           )}
         >
           {message.imageUrl && !isUser && (
-            <div className="mb-3 overflow-hidden rounded-xl">
+            <div className="mb-3 overflow-hidden rounded-xl cursor-zoom-in" onClick={(e) => { e.stopPropagation(); setEnlargedImage(message.imageUrl!); }}>
               <img
                 src={message.imageUrl}
                 alt=""
-                className="w-full h-40 object-cover"
+                className="w-full h-40 object-cover hover:opacity-90 transition-opacity"
                 loading="lazy"
               />
             </div>
@@ -132,6 +142,7 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
         )}
       </div>
     </div>
+    </>
   );
 });
 
