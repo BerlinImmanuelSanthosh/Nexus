@@ -130,7 +130,7 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps
           }
           onClose={handleCloseExpand}
           // Pass loading flag so modal can show a spinner if it supports it
-          isLoading={isLoadingSimplified}
+          
         />
       )}
     </>
