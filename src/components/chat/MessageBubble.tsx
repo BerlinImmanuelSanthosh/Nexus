@@ -93,11 +93,19 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest }: MessageBubbleProp
           )}
         >
           {message.imageUrl && !isUser && (
-            <div className="mb-3 overflow-hidden rounded-xl cursor-zoom-in" onClick={(e) => { e.stopPropagation(); setEnlargedImage(message.imageUrl!); }}>
+            <div
+              className="mb-3 overflow-hidden rounded-xl cursor-zoom-in"
+              onClickCapture={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                e.nativeEvent.stopImmediatePropagation();
+                setEnlargedImage(message.imageUrl!);
+              }}
+            >
               <img
                 src={message.imageUrl}
                 alt=""
-                className="w-full h-40 object-cover hover:opacity-90 transition-opacity"
+                className="w-full h-40 object-cover hover:opacity-90 transition-opacity pointer-events-none"
                 loading="lazy"
               />
             </div>
