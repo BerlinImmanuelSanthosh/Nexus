@@ -20,10 +20,13 @@ const RoadmapSetup = memo(({ onGenerate, onBack, isGenerating }: RoadmapSetupPro
   };
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-4">
-      <Button variant="ghost" className="absolute top-4 left-4" onClick={onBack}>
-        <ArrowLeft className="h-4 w-4 mr-2" /> Back
-      </Button>
+    <div className="flex flex-1 flex-col items-center justify-center px-4 relative">
+      {/* Back button positioned in the content area, not overlapping sidebar */}
+      <div className="absolute top-4 right-4">
+        <Button variant="outline" size="sm" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4 mr-2" /> Back to Chat
+        </Button>
+      </div>
 
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-3">
@@ -31,7 +34,7 @@ const RoadmapSetup = memo(({ onGenerate, onBack, isGenerating }: RoadmapSetupPro
             <Map className="h-8 w-8 text-primary" />
           </div>
           <h2 className="text-2xl font-bold text-foreground">Build Your Roadmap</h2>
-          <p className="text-muted-foreground">Enter a subject and we'll create a personalized learning path for you.</p>
+          <p className="text-muted-foreground">Enter a subject and we'll create a personalized learning path with curated online resources.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
