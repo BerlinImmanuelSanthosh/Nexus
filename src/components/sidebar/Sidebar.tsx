@@ -1,4 +1,4 @@
-import { Plus, PanelLeftClose, PanelLeft, BrainCircuit, BarChart3, BookPlus } from 'lucide-react';
+import { Plus, PanelLeftClose, PanelLeft, BrainCircuit, BarChart3, BookPlus, Map } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Conversation } from '@/types/chat';
 import ConversationItem from './ConversationItem';
