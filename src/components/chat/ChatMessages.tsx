@@ -1,7 +1,6 @@
 import { useRef, useEffect, memo, useState, useCallback } from 'react';
 import { Message } from '@/types/chat';
 import MessageBubble from './MessageBubble';
-import ThinkingRobot from './ThinkingRobot';
 import MessageExpandModal from './MessageExpandModal';
 import { Sparkles } from 'lucide-react';
 
@@ -9,15 +8,12 @@ interface ChatMessagesProps {
   messages: Message[];
   isTyping: boolean;
   onTakeTest?: (question: string) => void;
+  onRoadmap?: (subject: string) => void;
 }
 
-const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps) => {
+const ChatMessages = memo(({ messages, isTyping, onTakeTest, onRoadmap }: ChatMessagesProps) => {
   const bottomRef = useRef<HTMLDivElement>(null);
-
-  // Original expanded message state (the clicked message itself)
   const [expandedMessage, setExpandedMessage] = useState<Message | null>(null);
-
-  // NEW: state for the short 300-400 word response fetched from backend
   const [simplifiedContent, setSimplifiedContent] = useState<string>('');
   const [isLoadingSimplified, setIsLoadingSimplified] = useState<boolean>(false);
 
@@ -25,21 +21,16 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  // NEW: when user clicks a message bubble, call /api/teach-simple with
-  // the clicked message as "previous_response" so backend compresses it
-  // into a fresh 300-400 word summary — NOT the same text repeated.
   const handleExpand = useCallback(async (message: Message) => {
-    // For non-AI messages, open modal immediately as before
     if (!message.content || message.role !== 'assistant') {
       setExpandedMessage(message);
       setSimplifiedContent('');
       return;
     }
 
-    // Show loading state BEFORE opening modal so original message never flashes
     setIsLoadingSimplified(true);
     setSimplifiedContent('');
-    setExpandedMessage(null); // keep modal closed while fetching
+    setExpandedMessage(null);
 
     try {
       const res = await fetch('http://localhost:8000/api/teach-simple', {
@@ -53,14 +44,12 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps
       });
 
       if (!res.ok) throw new Error(`API error: ${res.status}`);
-
       const data = await res.json();
       setSimplifiedContent(data.response || '');
     } catch (err) {
       console.error('teach-simple error:', err);
-      setSimplifiedContent(''); // fallback: modal will show original
+      setSimplifiedContent('');
     } finally {
-      // NOW open the modal — content is ready, no flash
       setExpandedMessage(message);
       setIsLoadingSimplified(false);
     }
@@ -88,7 +77,6 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps
 
   return (
     <>
-      {/* Subtle full-screen loading overlay while fetching simplified response */}
       {isLoadingSimplified && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-3 rounded-2xl bg-background/90 px-8 py-6 shadow-xl">
@@ -104,33 +92,26 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest }: ChatMessagesProps
             message={message}
             onExpand={handleExpand}
             onTakeTest={onTakeTest}
+            onRoadmap={onRoadmap}
           />
         ))}
-        {isTyping && (
-          <div className="flex gap-4 animate-fade-in">
-            <div className="rounded-2xl rounded-bl-md bg-chat-ai">
-              <ThinkingRobot />
-            </div>
+        {/* Streaming cursor shown while typing and last message is still being built */}
+        {isTyping && messages.length > 0 && messages[messages.length - 1]?.role === 'assistant' && (
+          <div className="flex gap-4 pl-12">
+            <span className="inline-block h-4 w-1 animate-pulse bg-primary rounded-full" />
           </div>
         )}
         <div ref={bottomRef} />
       </div>
 
-      {/* Modal: shows the short 300-400 word summary from backend,
-          OR a loading state while fetching,
-          OR falls back to the original message if fetch failed */}
       {expandedMessage && (
         <MessageExpandModal
           message={
-            // If we have a simplified response, override the modal content
-            // by creating a shallow copy of the message with new content
             simplifiedContent
               ? { ...expandedMessage, content: simplifiedContent }
               : expandedMessage
           }
           onClose={handleCloseExpand}
-          // Pass loading flag so modal can show a spinner if it supports it
-          
         />
       )}
     </>
