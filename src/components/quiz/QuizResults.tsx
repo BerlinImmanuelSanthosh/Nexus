@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { ArrowLeft, CheckCircle, XCircle, Trophy } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+// ========== ORIGINAL COMPONENT (unchanged) ==========
 interface QuizResultsProps {
   result: QuizResult;
   onBack: () => void;
@@ -69,3 +70,83 @@ const QuizResults = ({ result, onBack, onNewQuiz }: QuizResultsProps) => {
 };
 
 export default QuizResults;
+
+// ========== NEW COMPONENT (added below, renamed) ==========
+import { QuizResultData } from "@/types/quiz";
+
+interface QuizResultsBackendProps {
+  result: QuizResultData;
+  onRetry: () => void;
+}
+
+export function QuizResultsBackend({ result, onRetry }: QuizResultsBackendProps) {
+  const percentage = Math.round((result.total_awarded / result.total_possible) * 100);
+
+  function getGrade() {
+    if (percentage >= 90) return { label: "Excellent", color: "text-green-400" };
+    if (percentage >= 75) return { label: "Good", color: "text-blue-400" };
+    if (percentage >= 50) return { label: "Pass", color: "text-yellow-400" };
+    return { label: "Needs Improvement", color: "text-red-400" };
+  }
+
+  const grade = getGrade();
+
+  return (
+    <div className="p-6 max-w-3xl mx-auto space-y-6">
+
+      {/* Total score card */}
+      <div className="rounded-xl border border-white/10 bg-white/5 p-6 text-center">
+        <p className="text-sm text-gray-400 mb-1">Your Score</p>
+        <p className="text-5xl font-bold text-white">
+          {result.total_awarded}
+          <span className="text-2xl text-gray-400"> / {result.total_possible}</span>
+        </p>
+        <p className={`mt-2 text-lg font-semibold ${grade.color}`}>
+          {grade.label} — {percentage}%
+        </p>
+      </div>
+
+      {/* Per-question breakdown */}
+      <div className="space-y-4">
+        {result.evaluations.map((ev, i) => (
+          <div
+            key={ev.question_id}
+            className="rounded-xl border border-white/10 bg-white/5 p-5 space-y-2"
+          >
+            {/* Question */}
+            <p className="text-sm text-gray-400">Question {i + 1}</p>
+            <p className="text-white font-medium">{ev.question}</p>
+
+            {/* Marks badge */}
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-sm font-semibold px-3 py-1 rounded-full ${
+                  ev.awarded_marks === ev.max_marks
+                    ? "bg-green-500/20 text-green-400"
+                    : ev.awarded_marks === 0
+                    ? "bg-red-500/20 text-red-400"
+                    : "bg-yellow-500/20 text-yellow-400"
+                }`}
+              >
+                {ev.awarded_marks} / {ev.max_marks} marks
+              </span>
+            </div>
+
+            {/* AI feedback */}
+            <p className="text-sm text-gray-300 border-l-2 border-white/20 pl-3">
+              {ev.feedback}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* Retry button */}
+      <button
+        onClick={onRetry}
+        className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold transition"
+      >
+        Try Another Quiz
+      </button>
+    </div>
+  );
+}

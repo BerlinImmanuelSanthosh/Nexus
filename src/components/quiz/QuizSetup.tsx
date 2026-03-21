@@ -17,21 +17,20 @@ interface QuizSetupProps {
 }
 
 const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
-  // When coming from chat, auto-derive a short subject label from the message
   const autoSubject = chatQuestion
     ? chatQuestion.slice(0, 60).replace(/\n/g, ' ').trim()
     : '';
 
-  const [subject, setSubject] = useState(autoSubject);
-  const [questions, setQuestions] = useState<QuestionConfig[]>([{ marks: 1, count: 5 }]);
-  const [timeHours, setTimeHours] = useState(0);
-  const [timeMinutes, setTimeMinutes] = useState(30);
-  const [mode, setMode] = useState<'normal' | 'real'>('normal');
+  const [subject, setSubject]           = useState(autoSubject);
+  const [questions, setQuestions]       = useState<QuestionConfig[]>([{ marks: 1, count: 5 }]);
+  const [timeHours, setTimeHours]       = useState(0);
+  const [timeMinutes, setTimeMinutes]   = useState(30);
+  const [mode, setMode]                 = useState<'normal' | 'real'>('normal');
   const [attachedFile, setAttachedFile] = useState<{ name: string; text: string } | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const totalMarks = questions.reduce((sum, q) => sum + q.marks * q.count, 0);
+  const totalMarks     = questions.reduce((sum, q) => sum + q.marks * q.count, 0);
   const totalQuestions = questions.reduce((sum, q) => sum + q.count, 0);
 
   const addQuestionType = () => {
@@ -71,7 +70,6 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
       let extractedText = '';
 
       if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        // Use pdf.js for proper PDF text extraction
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         const pages: string[] = [];
@@ -85,7 +83,6 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         }
         extractedText = pages.join('\n\n');
       } else {
-        // Plain text / doc files
         extractedText = await file.text();
       }
 
@@ -107,10 +104,18 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
     }
   };
 
+  // ── handleStart ────────────────────────────────────────────────────────────
+  // Just calls onStart — the parent calls startQuiz which calls generateQuestions,
+  // and generateQuestions now hits /api/quiz/generate correctly.
+  // No duplicate generateQuiz call needed here anymore.
   const handleStart = () => {
-    const effectiveSubject = chatQuestion ? autoSubject : (attachedFile ? attachedFile.text : subject);
+    const effectiveSubject = chatQuestion
+      ? autoSubject
+      : (attachedFile ? attachedFile.text : subject);
+
     if (!effectiveSubject.trim()) return;
     if (timeHours === 0 && timeMinutes === 0) return;
+
     onStart({ subject: effectiveSubject, questions, timeHours, timeMinutes, mode });
   };
 
@@ -127,7 +132,7 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
           </div>
         </div>
 
-        {/* Subject — hidden when coming from chat (auto-filled) */}
+        {/* Subject */}
         {chatQuestion ? (
           <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
             <div className="flex items-center gap-2 mb-2">
@@ -149,7 +154,7 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
               placeholder="e.g. Physics, Mathematics, History..."
               className="w-full rounded-xl border border-border bg-secondary/50 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
             />
-            
+
             {/* File attachment */}
             <input
               ref={fileInputRef}
@@ -180,11 +185,13 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
                 )}
               </Button>
             )}
-            <p className="text-xs text-muted-foreground">Type a subject or upload a document — questions will be generated from the content</p>
+            <p className="text-xs text-muted-foreground">
+              Type a subject or upload a document — questions will be generated from the content
+            </p>
           </div>
         )}
 
-        {/* Questions config — if from chat, only ask for marks */}
+        {/* Questions config */}
         {chatQuestion ? (
           <div className="space-y-3">
             <label className="text-sm font-medium text-foreground">Marks for this question</label>
@@ -201,7 +208,9 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
                 />
               </div>
               <p className="text-xs text-muted-foreground flex-1">
-                {questions[0]?.marks === 1 ? '4 choices (MCQ)' : `Written answer (min ${(questions[0]?.marks ?? 2) * 10} words)`}
+                {questions[0]?.marks === 1
+                  ? '4 choices (MCQ)'
+                  : `Written answer (min ${(questions[0]?.marks ?? 2) * 10} words)`}
               </p>
             </div>
           </div>
@@ -236,11 +245,18 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
                     </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    {q.marks === 1 ? '4 choices (MCQ)' : `Written answer (min ${q.marks * 10} words)`}
+                    {q.marks === 1
+                      ? '4 choices (MCQ)'
+                      : `Written answer (min ${q.marks * 10} words)`}
                   </p>
                 </div>
                 {questions.length > 1 && (
-                  <Button variant="ghost" size="icon" onClick={() => removeQuestionType(i)} className="shrink-0 text-destructive hover:text-destructive">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => removeQuestionType(i)}
+                    className="shrink-0 text-destructive hover:text-destructive"
+                  >
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 )}
@@ -255,7 +271,9 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         {/* Total Marks */}
         <div className="rounded-xl border border-primary/30 bg-primary/5 p-4 text-center">
           <p className="text-sm text-muted-foreground">Total</p>
-          <p className="text-2xl font-bold gradient-text">{totalQuestions} Questions • {totalMarks} Marks</p>
+          <p className="text-2xl font-bold gradient-text">
+            {totalQuestions} Questions • {totalMarks} Marks
+          </p>
         </div>
 
         {/* Time */}
@@ -324,7 +342,10 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         {/* Start Button */}
         <Button
           onClick={handleStart}
-          disabled={(chatQuestion ? false : (!subject.trim() && !attachedFile)) || (timeHours === 0 && timeMinutes === 0)}
+          disabled={
+            (chatQuestion ? false : (!subject.trim() && !attachedFile)) ||
+            (timeHours === 0 && timeMinutes === 0)
+          }
           className="w-full h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
         >
           Confirm & Start Test

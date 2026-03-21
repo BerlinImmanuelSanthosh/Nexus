@@ -1,3 +1,5 @@
 venv/
 Backend/venv/
 .env
+node_modules/
+dist/

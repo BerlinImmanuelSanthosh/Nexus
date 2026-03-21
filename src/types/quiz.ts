@@ -1,3 +1,41 @@
+export interface QuizQuestionItem {
+  id: string;
+  question: string;
+  max_marks: number;
+  expected_answer?: string; // kept server-side only ideally
+}
+
+export interface QuizAnswerItem {
+  question_id: string;
+  question: string;
+  student_answer: string;
+  max_marks: number;
+}
+
+export interface EvaluatedAnswer {
+  question_id: string;
+  question: string;
+  student_answer: string;
+  awarded_marks: number;
+  max_marks: number;
+  feedback: string;
+}
+
+export interface QuizResultData {
+  evaluations: EvaluatedAnswer[];
+  total_awarded: number;
+  total_possible: number;
+}
+
+export interface QuizSetupConfig {
+  topic: string;
+  num_questions: number;
+  marks_per_question: number;
+  difficulty: "easy" | "medium" | "hard";
+}
+
+// ========== ORIGINAL CODE (unchanged) ==========
+
 export interface QuizConfig {
   subject: string;
   questions: QuestionConfig[];

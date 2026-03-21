@@ -13,6 +13,8 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import { useQuiz } from '@/hooks/useQuiz';
+import { QuizResultsBackend as QuizResults } from './QuizResults'; // Import the new component with correct props
 
 interface QuizPageProps {
   config: QuizConfig;
@@ -30,6 +32,9 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
   // One ref per written question to export canvas+text
   const editorRefs = useRef<Record<string, AnswerEditorRef | null>>({});
 
+  // Destructure result and reset as well
+  const { submitAnswers, result, reset, loading: submitLoading } = useQuiz();
+
   const handleTimeUp = useCallback(() => {
     // Flush all editor data before submitting
     questions.forEach(q => {
@@ -44,8 +49,8 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
     onSubmit();
   }, [onSubmit, questions, onUpdateAnswer]);
 
-  const handleSubmitConfirmed = useCallback(() => {
-    // Flush all editor data
+  const handleSubmitConfirmed = useCallback(async () => {
+    // 1. Flush all editor data
     questions.forEach(q => {
       if (q.type === 'written') {
         const edRef = editorRefs.current[q.id];
@@ -55,8 +60,36 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
         }
       }
     });
-    onSubmit();
-  }, [onSubmit, questions, onUpdateAnswer]);
+
+    // 2. Build answers for the evaluation endpoint
+    const newAnswers = questions.map(q => {
+      const answer = answers.find(a => a.questionId === q.id);
+      let studentAnswer = '';
+      if (q.type === 'mcq') {
+        studentAnswer = answer?.selectedOption || '';
+      } else {
+        const editor = editorRefs.current[q.id];
+        const { text, canvasData } = editor?.getExportData() || { text: '', canvasData: '' };
+        studentAnswer = text || '';
+        if (canvasData) studentAnswer += `\n[Canvas drawing: ${canvasData.slice(0, 50)}...]`;
+      }
+      return {
+        question_id: q.id,
+        question: q.question,
+        student_answer: studentAnswer,
+        max_marks: q.marks,
+      };
+    });
+
+    // 3. Call the evaluation endpoint
+    try {
+      await submitAnswers(newAnswers);
+    } catch (error) {
+      console.error('Submit error:', error);
+      // Optionally show toast error here
+    }
+    // No onSubmit() call here – result screen will handle navigation
+  }, [onSubmit, questions, answers, onUpdateAnswer, submitAnswers]);
 
   const toggleQuestion = (id: string) => {
     setExpandedQuestion(prev => prev === id ? null : id);
@@ -75,6 +108,19 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
       document.removeEventListener('cut', handler);
     };
   }, [config.mode]);
+
+  // If evaluation is done, show results instead of the quiz
+  if (result) {
+    return (
+      <QuizResults
+        result={result}
+        onRetry={() => {
+          reset();       // clears result in the hook
+          onSubmit();    // tells parent to go back to setup
+        }}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden h-full">
@@ -174,8 +220,9 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
           <Button
             onClick={() => setShowConfirm(true)}
             className="px-8 h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
+            disabled={submitLoading}
           >
-            Done — Submit Quiz
+            {submitLoading ? 'Submitting...' : 'Done — Submit Quiz'}
           </Button>
         </div>
       </div>
