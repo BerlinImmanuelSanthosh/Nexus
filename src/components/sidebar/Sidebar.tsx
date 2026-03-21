@@ -103,6 +103,20 @@ const Sidebar = memo(({
             Performance Tracker
           </Button>
 
+          <Button
+            onClick={() => onViewChange?.('roadmap-setup')}
+            variant={currentView === 'roadmap-setup' || currentView === 'roadmap' ? 'default' : 'outline'}
+            className={cn(
+              "w-full justify-start gap-2",
+              (currentView === 'roadmap-setup' || currentView === 'roadmap')
+                ? "bg-primary text-primary-foreground"
+                : "border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent"
+            )}
+          >
+            <Map className="h-4 w-4" />
+            Roadmap
+          </Button>
+
           {/* New Quiz button - shown when in quiz mode */}
           {(currentView === 'quiz' || currentView === 'quiz-results') && (
             <Button
