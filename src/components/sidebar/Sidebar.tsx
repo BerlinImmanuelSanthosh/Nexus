@@ -5,7 +5,7 @@ import ConversationItem from './ConversationItem';
 import { cn } from '@/lib/utils';
 import { memo, useCallback } from 'react';
 
-type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance';
+type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance' | 'roadmap-setup' | 'roadmap';
 
 interface SidebarProps {
   conversations: Conversation[];
