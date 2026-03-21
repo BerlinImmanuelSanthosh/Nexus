@@ -4,18 +4,21 @@ import ChatMessages from '@/components/chat/ChatMessages';
 import ChatInput from '@/components/chat/ChatInput';
 import { useChat } from '@/hooks/useChat';
 import { useQuiz } from '@/hooks/useQuiz';
+import { useRoadmap } from '@/hooks/useRoadmap';
 import IntroAnimation from '@/components/ui/IntroAnimation';
 import QuizSetup from '@/components/quiz/QuizSetup';
 import QuizPage from '@/components/quiz/QuizPage';
 import QuizResults from '@/components/quiz/QuizResults';
 import PerformanceTracker from '@/components/performance/PerformanceTracker';
+import RoadmapSetup from '@/components/roadmap/RoadmapSetup';
+import RoadmapView from '@/components/roadmap/RoadmapView';
 import { QuizConfig, QuizResult } from '@/types/quiz';
 import { cn } from '@/lib/utils';
 import { Loader2 } from 'lucide-react';
 
 const AnimatedBackground = lazy(() => import('@/components/ui/AnimatedBackground'));
 
-type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance';
+type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance' | 'roadmap-setup' | 'roadmap';
 
 const Index = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -38,11 +41,18 @@ const Index = () => {
   const {
     quizResults,
     currentQuiz,
-    isGenerating,
+    isGenerating: isQuizGenerating,
     startQuiz,
     updateAnswer,
     evaluateQuiz,
   } = useQuiz();
+
+  const {
+    activeRoadmap,
+    isGenerating: isRoadmapGenerating,
+    generateRoadmap,
+    toggleLessonFinished,
+  } = useRoadmap();
 
   const handleIntroComplete = useCallback(() => setShowIntro(false), []);
   const handleToggleSidebar = useCallback(() => setSidebarOpen(prev => !prev), []);
@@ -70,6 +80,16 @@ const Index = () => {
     setCurrentView('quiz-setup');
   }, []);
 
+  const handleRoadmapFromChat = useCallback(async (subject: string) => {
+    setCurrentView('roadmap');
+    await generateRoadmap(subject);
+  }, [generateRoadmap]);
+
+  const handleRoadmapGenerate = useCallback(async (subject: string) => {
+    setCurrentView('roadmap');
+    await generateRoadmap(subject);
+  }, [generateRoadmap]);
+
   if (showIntro) {
     return <IntroAnimation onComplete={handleIntroComplete} />;
   }
@@ -80,7 +100,7 @@ const Index = () => {
         return <QuizSetup onStart={handleStartQuiz} onBack={() => { setCurrentView('chat'); setChatQuestion(null); }} chatQuestion={chatQuestion} />;
       
       case 'quiz':
-        if (isGenerating) {
+        if (isQuizGenerating) {
           return (
             <div className="flex flex-1 items-center justify-center">
               <div className="flex flex-col items-center gap-3">
@@ -122,11 +142,48 @@ const Index = () => {
             onBack={() => setCurrentView('chat')}
           />
         );
+
+      case 'roadmap-setup':
+        return (
+          <RoadmapSetup
+            onGenerate={handleRoadmapGenerate}
+            onBack={() => setCurrentView('chat')}
+            isGenerating={isRoadmapGenerating}
+          />
+        );
+
+      case 'roadmap':
+        if (isRoadmapGenerating) {
+          return (
+            <div className="flex flex-1 items-center justify-center">
+              <div className="flex flex-col items-center gap-3">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                <p className="text-muted-foreground">Building your roadmap...</p>
+              </div>
+            </div>
+          );
+        }
+        if (activeRoadmap) {
+          return (
+            <RoadmapView
+              roadmap={activeRoadmap}
+              onBack={() => setCurrentView('chat')}
+              onToggleLesson={toggleLessonFinished}
+            />
+          );
+        }
+        return (
+          <RoadmapSetup
+            onGenerate={handleRoadmapGenerate}
+            onBack={() => setCurrentView('chat')}
+            isGenerating={isRoadmapGenerating}
+          />
+        );
       
       default:
         return (
           <>
-            <ChatMessages messages={messages} isTyping={isTyping} onTakeTest={handleTakeTestFromChat} />
+            <ChatMessages messages={messages} isTyping={isTyping} onTakeTest={handleTakeTestFromChat} onRoadmap={handleRoadmapFromChat} />
             <div className="border-t border-border bg-background/80 p-4 backdrop-blur-sm">
               <div className={cn(
                 "mx-auto transition-all duration-300",

@@ -1,11 +1,11 @@
-import { Plus, PanelLeftClose, PanelLeft, BrainCircuit, BarChart3, BookPlus } from 'lucide-react';
+import { Plus, PanelLeftClose, PanelLeft, BrainCircuit, BarChart3, BookPlus, Map } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Conversation } from '@/types/chat';
 import ConversationItem from './ConversationItem';
 import { cn } from '@/lib/utils';
 import { memo, useCallback } from 'react';
 
-type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance';
+type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance' | 'roadmap-setup' | 'roadmap';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -101,6 +101,20 @@ const Sidebar = memo(({
           >
             <BarChart3 className="h-4 w-4" />
             Performance Tracker
+          </Button>
+
+          <Button
+            onClick={() => onViewChange?.('roadmap-setup')}
+            variant={currentView === 'roadmap-setup' || currentView === 'roadmap' ? 'default' : 'outline'}
+            className={cn(
+              "w-full justify-start gap-2",
+              (currentView === 'roadmap-setup' || currentView === 'roadmap')
+                ? "bg-primary text-primary-foreground"
+                : "border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent"
+            )}
+          >
+            <Map className="h-4 w-4" />
+            Roadmap
           </Button>
 
           {/* New Quiz button - shown when in quiz mode */}

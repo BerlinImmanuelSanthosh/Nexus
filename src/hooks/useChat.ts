@@ -61,14 +61,28 @@ export function useChat() {
 
     setIsTyping(true);
 
+    const aiMessageId = generateId();
+
+    // Create an empty assistant message for streaming
+    const aiMessage: Message = {
+      id: aiMessageId,
+      content: '',
+      role: 'assistant',
+      timestamp: new Date(),
+    };
+
+    setConversations(prev => prev.map(c =>
+      c.id === conversationId
+        ? { ...c, messages: [...c.messages, aiMessage], updatedAt: new Date() }
+        : c
+    ));
+
     try {
       const currentConversation = conversations.find(c => c.id === conversationId);
 
-      // 🔥 KEY FIX: Detect click re-explain trigger
       const isReExplain = content.toLowerCase().includes('reexplain');
 
       let messagesForBackend;
-
       if (isReExplain && currentConversation) {
         const firstUserMessage = currentConversation.messages.find(m => m.role === 'user');
         messagesForBackend = firstUserMessage
@@ -76,17 +90,12 @@ export function useChat() {
           : [{ role: 'user', content }];
       } else {
         messagesForBackend = [...(currentConversation?.messages || []), userMessage]
-          .map(msg => ({
-            role: msg.role,
-            content: msg.content
-          }));
+          .map(msg => ({ role: msg.role, content: msg.content }));
       }
 
       const response = await fetch('http://localhost:8000/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: messagesForBackend,
           mode: 'simple_english'
@@ -97,44 +106,128 @@ export function useChat() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      const data = await response.json();
+      // Try streaming first
+      if (response.body) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullText = '';
+        let done = false;
 
-      // Generate a related image from query keywords
-      const keywords = content
-        .split(/\s+/)
-        .filter(w => w.length > 2)
-        .slice(0, 3)
-        .join('+');
+        while (!done) {
+          const { value, done: readerDone } = await reader.read();
+          done = readerDone;
+          if (value) {
+            const chunk = decoder.decode(value, { stream: true });
+            
+            // Try to parse as JSON (non-streaming backend)
+            try {
+              const parsed = JSON.parse(fullText + chunk);
+              if (parsed.response) {
+                fullText = parsed.response;
+                // Update in one go
+                setConversations(prev => prev.map(c =>
+                  c.id === conversationId
+                    ? {
+                        ...c,
+                        messages: c.messages.map(m =>
+                          m.id === aiMessageId ? { ...m, content: fullText } : m
+                        ),
+                        updatedAt: new Date(),
+                      }
+                    : c
+                ));
+                break;
+              }
+            } catch {
+              // Not JSON yet or streaming - accumulate and show progressively
+              fullText += chunk;
+              
+              // Check if we have SSE data lines
+              if (chunk.includes('data: ')) {
+                const lines = chunk.split('\n');
+                for (const line of lines) {
+                  if (line.startsWith('data: ')) {
+                    const jsonStr = line.slice(6).trim();
+                    if (jsonStr === '[DONE]') { done = true; break; }
+                    try {
+                      const parsed = JSON.parse(jsonStr);
+                      const delta = parsed.choices?.[0]?.delta?.content;
+                      if (delta) {
+                        fullText = (fullText.replace(chunk, '')) + delta;
+                      }
+                    } catch { /* partial */ }
+                  }
+                }
+              }
+              
+              // Progressive update
+              const displayText = fullText.replace(/^data: .*$/gm, '').replace(/\[DONE\]/g, '').trim();
+              if (displayText) {
+                setConversations(prev => prev.map(c =>
+                  c.id === conversationId
+                    ? {
+                        ...c,
+                        messages: c.messages.map(m =>
+                          m.id === aiMessageId ? { ...m, content: displayText } : m
+                        ),
+                        updatedAt: new Date(),
+                      }
+                    : c
+                ));
+              }
+            }
+          }
+        }
 
-      const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
+        // Final: add image
+        const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
+        const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
 
-      const aiMessage: Message = {
-        id: generateId(),
-        content: data.response,
-        role: 'assistant',
-        timestamp: new Date(),
-        imageUrl,
-      };
+        setConversations(prev => prev.map(c =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map(m =>
+                  m.id === aiMessageId ? { ...m, imageUrl } : m
+                ),
+                updatedAt: new Date(),
+              }
+            : c
+        ));
+      } else {
+        // Fallback: no streaming body
+        const data = await response.json();
+        const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
+        const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
 
-      setConversations(prev => prev.map(c =>
-        c.id === conversationId
-          ? { ...c, messages: [...c.messages, aiMessage], updatedAt: new Date() }
-          : c
-      ));
-
+        setConversations(prev => prev.map(c =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map(m =>
+                  m.id === aiMessageId
+                    ? { ...m, content: data.response, imageUrl }
+                    : m
+                ),
+                updatedAt: new Date(),
+              }
+            : c
+        ));
+      }
     } catch (error) {
       console.error('Chat error:', error);
 
-      const errorMessage: Message = {
-        id: generateId(),
-        content: 'Failed to get a response. Is the backend running?',
-        role: 'assistant',
-        timestamp: new Date(),
-      };
-
       setConversations(prev => prev.map(c =>
         c.id === conversationId
-          ? { ...c, messages: [...c.messages, errorMessage], updatedAt: new Date() }
+          ? {
+              ...c,
+              messages: c.messages.map(m =>
+                m.id === aiMessageId
+                  ? { ...m, content: 'Failed to get a response. Is the backend running?' }
+                  : m
+              ),
+              updatedAt: new Date(),
+            }
           : c
       ));
     } finally {
