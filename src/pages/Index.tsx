@@ -48,10 +48,12 @@ const Index = () => {
   } = useQuiz();
 
   const {
+    roadmaps,
     activeRoadmap,
     isGenerating: isRoadmapGenerating,
     generateRoadmap,
     toggleLessonFinished,
+    setActiveRoadmap,
   } = useRoadmap();
 
   const handleIntroComplete = useCallback(() => setShowIntro(false), []);
