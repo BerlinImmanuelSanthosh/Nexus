@@ -92,6 +92,16 @@ const Index = () => {
     await generateRoadmap(subject);
   }, [generateRoadmap]);
 
+  const handleSelectQuizResult = useCallback((result: QuizResult) => {
+    setLatestResult(result);
+    setCurrentView('quiz-results');
+  }, []);
+
+  const handleSelectRoadmap = useCallback((roadmap: any) => {
+    setActiveRoadmap(roadmap);
+    setCurrentView('roadmap');
+  }, [setActiveRoadmap]);
+
   if (showIntro) {
     return <IntroAnimation onComplete={handleIntroComplete} />;
   }
