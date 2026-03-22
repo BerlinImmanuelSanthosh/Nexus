@@ -163,6 +163,7 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
       return;
     }
     onFileUpload?.(file);
+    setAttachedFile(file);
     toast.success(`Attached: ${file.name}`);
     e.target.value = '';
   };
