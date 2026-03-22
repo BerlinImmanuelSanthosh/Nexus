@@ -2,6 +2,7 @@ Backend
 __pycache__
 venv
 Ingest.py
+Structure.txt
 knowledge_base.json
 main.py
 requirements.txt
@@ -126,6 +127,3 @@ package.json
 postcss.config.js
 tailwind.config.ts
 tsconfig.app.json
-tsconfig.json
-tsconfig.node.json
-vite.config.ts

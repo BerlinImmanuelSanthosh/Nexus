@@ -30,36 +30,6 @@ export function useChat() {
     }
   }, [activeConversationId]);
 
-  // ── Upload file to backend ──────────────────────────────────────────────
-  const uploadFile = useCallback(async (file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-      const response = await fetch('http://localhost:8000/api/upload-file', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json();
-      if (data.success) {
-        return true;
-      } else {
-        return false;
-      }
-    } catch (error) {
-      console.error('File upload error:', error);
-      return false;
-    }
-  }, []);
-
-  // ── Clear file from backend memory ─────────────────────────────────────
-  const clearFile = useCallback(async () => {
-    try {
-      await fetch('http://localhost:8000/api/clear-file', { method: 'POST' });
-    } catch (error) {
-      console.error('Clear file error:', error);
-    }
-  }, []);
-
   const sendMessage = useCallback(async (content: string) => {
     let conversationId = activeConversationId;
 
@@ -93,6 +63,7 @@ export function useChat() {
 
     const aiMessageId = generateId();
 
+    // Create an empty assistant message for streaming
     const aiMessage: Message = {
       id: aiMessageId,
       content: '',
@@ -108,6 +79,7 @@ export function useChat() {
 
     try {
       const currentConversation = conversations.find(c => c.id === conversationId);
+
       const isReExplain = content.toLowerCase().includes('reexplain');
 
       let messagesForBackend;
@@ -121,7 +93,8 @@ export function useChat() {
           .map(msg => ({ role: msg.role, content: msg.content }));
       }
 
-      const response = await fetch('http://localhost:8000/api/chat', {
+      // ── STREAMING endpoint ──────────────────────────────────────────────
+      const response = await fetch('http://localhost:8000/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -137,87 +110,83 @@ export function useChat() {
       if (response.body) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let fullText = '';
+        let streamedText = '';
+        let buffer = '';
         let done = false;
 
         while (!done) {
           const { value, done: readerDone } = await reader.read();
           done = readerDone;
+
           if (value) {
-            const chunk = decoder.decode(value, { stream: true });
+            // Accumulate in buffer so split SSE lines are handled correctly
+            buffer += decoder.decode(value, { stream: true });
 
-            try {
-              const parsed = JSON.parse(fullText + chunk);
-              if (parsed.response) {
-                fullText = parsed.response;
-                setConversations(prev => prev.map(c =>
-                  c.id === conversationId
-                    ? {
-                        ...c,
-                        messages: c.messages.map(m =>
-                          m.id === aiMessageId ? { ...m, content: fullText } : m
-                        ),
-                        updatedAt: new Date(),
-                      }
-                    : c
-                ));
-                break;
-              }
-            } catch {
-              fullText += chunk;
+            // Process every complete line in the buffer
+            const lines = buffer.split('\n');
+            // Keep the last (possibly incomplete) line in the buffer
+            buffer = lines.pop() ?? '';
 
-              if (chunk.includes('data: ')) {
-                const lines = chunk.split('\n');
-                for (const line of lines) {
-                  if (line.startsWith('data: ')) {
-                    const jsonStr = line.slice(6).trim();
-                    if (jsonStr === '[DONE]') { done = true; break; }
-                    try {
-                      const parsed = JSON.parse(jsonStr);
-                      const delta = parsed.choices?.[0]?.delta?.content;
-                      if (delta) {
-                        fullText = (fullText.replace(chunk, '')) + delta;
-                      }
-                    } catch { /* partial */ }
-                  }
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith('data: ')) continue;
+
+              const jsonStr = trimmed.slice(6).trim();
+              if (!jsonStr || jsonStr === '[DONE]') { done = true; break; }
+
+              try {
+                const parsed = JSON.parse(jsonStr);
+
+                if (parsed.type === 'token' && parsed.content) {
+                  // Append token and update message in real time
+                  streamedText += parsed.content;
+                  const snapshot = streamedText;
+                  setConversations(prev => prev.map(c =>
+                    c.id === conversationId
+                      ? {
+                          ...c,
+                          messages: c.messages.map(m =>
+                            m.id === aiMessageId ? { ...m, content: snapshot } : m
+                          ),
+                          updatedAt: new Date(),
+                        }
+                      : c
+                  ));
                 }
-              }
 
-              const displayText = fullText.replace(/^data: .*$/gm, '').replace(/\[DONE\]/g, '').trim();
-              if (displayText) {
-                setConversations(prev => prev.map(c =>
-                  c.id === conversationId
-                    ? {
-                        ...c,
-                        messages: c.messages.map(m =>
-                          m.id === aiMessageId ? { ...m, content: displayText } : m
-                        ),
-                        updatedAt: new Date(),
-                      }
-                    : c
-                ));
+                if (parsed.type === 'image' && parsed.url) {
+                  // Attach image when backend sends it
+                  const imageUrl = parsed.url;
+                  setConversations(prev => prev.map(c =>
+                    c.id === conversationId
+                      ? {
+                          ...c,
+                          messages: c.messages.map(m =>
+                            m.id === aiMessageId ? { ...m, imageUrl } : m
+                          ),
+                          updatedAt: new Date(),
+                        }
+                      : c
+                  ));
+                }
+
+                if (parsed.type === 'done') { done = true; break; }
+
+                if (parsed.type === 'error') {
+                  throw new Error(parsed.message || 'Stream error');
+                }
+              } catch {
+                // partial / non-JSON line — skip
               }
             }
           }
         }
-
-        const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
-        const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
-        setConversations(prev => prev.map(c =>
-          c.id === conversationId
-            ? {
-                ...c,
-                messages: c.messages.map(m =>
-                  m.id === aiMessageId ? { ...m, imageUrl } : m
-                ),
-                updatedAt: new Date(),
-              }
-            : c
-        ));
       } else {
+        // Fallback: no streaming body
         const data = await response.json();
         const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
         const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
+
         setConversations(prev => prev.map(c =>
           c.id === conversationId
             ? {
@@ -234,6 +203,7 @@ export function useChat() {
       }
     } catch (error) {
       console.error('Chat error:', error);
+
       setConversations(prev => prev.map(c =>
         c.id === conversationId
           ? {
@@ -260,8 +230,6 @@ export function useChat() {
     setActiveConversationId,
     createNewConversation,
     sendMessage,
-    uploadFile,
-    clearFile,
     deleteConversation,
   };
 }
