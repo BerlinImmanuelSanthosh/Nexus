@@ -77,6 +77,7 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
     if (input.trim() && !disabled) {
       onSend(input.trim());
       setInput('');
+      setAttachedFile(null);
     }
   };
 
