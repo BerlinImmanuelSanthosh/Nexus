@@ -15,7 +15,6 @@ const API = "http://localhost:8000";
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
 export function useQuiz() {
-  // ── existing state ────────────────────────────────────────────────────────
   const [quizResults, setQuizResults]   = useState<QuizResult[]>([]);
   const [currentQuiz, setCurrentQuiz]   = useState<{
     config: QuizConfig;
@@ -23,45 +22,80 @@ export function useQuiz() {
     answers: QuizAnswer[];
   } | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [questions, setQuestions]       = useState<QuizQuestionItem[]>([]);
+  const [result, setResult]             = useState<QuizResultData | null>(null);
+  const [loading, setLoading]           = useState(false);
+  const [error, setError]               = useState<string | null>(null);
 
-  // ── new state ─────────────────────────────────────────────────────────────
-  const [questions, setQuestions] = useState<QuizQuestionItem[]>([]);
-  const [result, setResult]       = useState<QuizResultData | null>(null);
-  const [loading, setLoading]     = useState(false);
-  const [error, setError]         = useState<string | null>(null);
-
-  // ════════════════════════════════════════════════════════════════════════
-  //  generateQuestions  — NOW calls /api/quiz/generate (fixed)
-  //  Previously it called /api/chat which returned placeholder text.
-  // ════════════════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════════════
+  //  generateQuestions
+  //  BUG 2 FIX: For 1-mark MCQ questions the backend now returns
+  //  real options. We use them directly instead of hardcoding
+  //  "Option 1 / Option 2 / Option 3 / Option 4".
+  // ══════════════════════════════════════════════════════════════════════
   const generateQuestions = useCallback(async (
     config: QuizConfig,
     overrideQuestion?: string
   ): Promise<QuizQuestion[]> => {
     setIsGenerating(true);
     try {
-      // Single question from chat — keep existing behaviour
+      // ── Single question from chat — fetch options from backend too ──────
       if (overrideQuestion) {
         const marks = config.questions[0]?.marks ?? 2;
-        const q: QuizQuestion = {
-          id: generateId(),
+        if (marks === 1) {
+          // Always call backend so options are AI-generated for this topic
+          const res = await fetch(`${API}/api/quiz/generate`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              topic:              overrideQuestion,
+              num_questions:      1,
+              marks_per_question: 1,
+              difficulty:         'medium',
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const first = data.questions?.[0];
+            console.log('MCQ from backend (chat):', first);
+            if (first && first.options?.length >= 4) {
+              return [{
+                id:       first.id ?? generateId(),
+                question: first.question ?? overrideQuestion,
+                marks:    1,
+                type:     'mcq',
+                options:  first.options,
+              }];
+            }
+          }
+          // Backend failed — return question with empty options so UI shows error
+          // NOT hardcoded True/False — that would be wrong for every topic
+          console.warn('MCQ backend did not return valid options for:', overrideQuestion);
+          return [{
+            id:       generateId(),
+            question: overrideQuestion,
+            marks:    1,
+            type:     'mcq',
+            options:  ['A) Loading failed — retry', 'B) —', 'C) —', 'D) —'],
+          }];
+        }
+        // Written question from chat
+        return [{
+          id:       generateId(),
           question: overrideQuestion,
           marks,
-          type: marks === 1 ? 'mcq' : 'written',
-          options: marks === 1
-            ? ['A) Option 1', 'B) Option 2', 'C) Option 3', 'D) Option 4']
-            : undefined,
-        };
-        return [q];
+          type:     'written',
+          options:  undefined,
+        }];
       }
 
+      // ── Batch question generation ─────────────────────────────────────
       const allQuestions: QuizQuestion[] = [];
 
       for (const qConfig of config.questions) {
         try {
-          // ── call the dedicated quiz endpoint ──────────────────────────
           const res = await fetch(`${API}/api/quiz/generate`, {
-            method: 'POST',
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               topic:              config.subject,
@@ -71,35 +105,94 @@ export function useQuiz() {
             }),
           });
 
-          if (!res.ok) throw new Error('Backend returned error');
+          if (!res.ok) throw new Error(`Backend ${res.status}`);
 
           const data   = await res.json();
           const parsed: any[] = data.questions ?? [];
+          console.log(`Quiz questions from backend (${qConfig.marks}m):`, parsed);
+
+          const isMcq = qConfig.marks === 1;
 
           for (const q of parsed.slice(0, qConfig.count)) {
-            allQuestions.push({
-              id:      q.id ?? generateId(),
-              question: q.question,
-              marks:   q.max_marks ?? qConfig.marks,
-              // MCQ options not yet returned by backend — use written for all
-              options: qConfig.marks === 1
-                ? ['A) Option 1', 'B) Option 2', 'C) Option 3', 'D) Option 4']
-                : undefined,
-              type: qConfig.marks === 1 ? 'mcq' : 'written',
-            });
+            if (isMcq) {
+              // Validate that backend returned real options
+              const opts: string[] = q.options ?? [];
+              const hasRealOptions =
+                opts.length >= 4 &&
+                !opts.some((o: string) =>
+                  /option\s*[1-4abcd]/i.test(o) ||   // catches "Option 1", "Option A"
+                  /^(true|false)$/i.test(o.replace(/^[A-D]\)\s*/i, '').trim())  // catches bare True/False
+                );
+
+              if (!hasRealOptions) {
+                console.warn('Backend returned bad options, will retry question:', q);
+                // Don't push bad options — skip and let the catch block regenerate
+                continue;
+              }
+
+              allQuestions.push({
+                id:       q.id ?? generateId(),
+                question: q.question,
+                marks:    q.max_marks ?? 1,
+                type:     'mcq',
+                options:  opts.slice(0, 4),
+              });
+            } else {
+              allQuestions.push({
+                id:       q.id ?? generateId(),
+                question: q.question,
+                marks:    q.max_marks ?? qConfig.marks,
+                type:     'written',
+                options:  undefined,
+              });
+            }
           }
+
+          // If MCQ and we got fewer questions than requested, fill with a retry
+          if (isMcq && allQuestions.filter(q => q.type === 'mcq').length < qConfig.count) {
+            const missing = qConfig.count - allQuestions.filter(q => q.type === 'mcq').length;
+            console.warn(`Only got ${qConfig.count - missing}/${qConfig.count} valid MCQs, retrying for ${missing} more`);
+            // Retry once for the missing count
+            const res2 = await fetch(`${API}/api/quiz/generate`, {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                topic:              config.subject,
+                num_questions:      missing,
+                marks_per_question: 1,
+                difficulty:         'medium',
+              }),
+            });
+            if (res2.ok) {
+              const data2   = await res2.json();
+              const parsed2: any[] = data2.questions ?? [];
+              for (const q of parsed2.slice(0, missing)) {
+                const opts: string[] = q.options ?? [];
+                if (opts.length >= 4) {
+                  allQuestions.push({
+                    id:       q.id ?? generateId(),
+                    question: q.question,
+                    marks:    1,
+                    type:     'mcq',
+                    options:  opts.slice(0, 4),
+                  });
+                }
+              }
+            }
+          }
+
         } catch (err) {
-          console.error('Error generating questions:', err);
-          // Fallback so the quiz can still open
+          console.error('Error generating questions for config:', qConfig, err);
+          // Minimal fallback — shows the question number but signals failure
           for (let i = 0; i < qConfig.count; i++) {
             allQuestions.push({
               id:       generateId(),
-              question: `${config.subject}: Question ${allQuestions.length + 1} (${qConfig.marks} marks)`,
+              question: `[Failed to load — retry] ${config.subject} Q${allQuestions.length + 1}`,
               marks:    qConfig.marks,
+              type:     qConfig.marks === 1 ? 'mcq' : 'written',
               options:  qConfig.marks === 1
-                ? ['A) Option 1', 'B) Option 2', 'C) Option 3', 'D) Option 4']
+                ? ['A) Retry quiz generation', 'B) —', 'C) —', 'D) —']
                 : undefined,
-              type: qConfig.marks === 1 ? 'mcq' : 'written',
             });
           }
         }
@@ -111,7 +204,6 @@ export function useQuiz() {
     }
   }, []);
 
-  // ── startQuiz (unchanged signature) ──────────────────────────────────────
   const startQuiz = useCallback(async (
     config: QuizConfig,
     overrideQuestion?: string
@@ -122,7 +214,6 @@ export function useQuiz() {
     return qs;
   }, [generateQuestions]);
 
-  // ── updateAnswer (unchanged) ──────────────────────────────────────────────
   const updateAnswer = useCallback((questionId: string, answer: Partial<QuizAnswer>) => {
     setCurrentQuiz(prev => {
       if (!prev) return prev;
@@ -135,10 +226,6 @@ export function useQuiz() {
     });
   }, []);
 
-  // ════════════════════════════════════════════════════════════════════════
-  //  evaluateQuiz — NOW calls /api/quiz/evaluate (fixed)
-  //  Previously it called /api/chat which was unreliable.
-  // ════════════════════════════════════════════════════════════════════════
   const evaluateQuiz = useCallback(async (): Promise<QuizResult | null> => {
     if (!currentQuiz) return null;
     const { config, questions: qs, answers } = currentQuiz;
@@ -158,15 +245,14 @@ export function useQuiz() {
       });
 
       const res = await fetch(`${API}/api/quiz/evaluate`, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answers: payload }),
+        body:    JSON.stringify({ answers: payload }),
       });
 
       if (!res.ok) throw new Error('Evaluation failed');
 
       const data = await res.json();
-      // data = { evaluations: [...], total_awarded, total_possible }
 
       const questionResults: QuestionResult[] = qs.map(q => {
         const ev = (data.evaluations ?? []).find((e: any) => e.question_id === q.id);
@@ -218,7 +304,6 @@ export function useQuiz() {
     }
   }, [currentQuiz]);
 
-  // ── startQuizFromChat (unchanged) ─────────────────────────────────────────
   const startQuizFromChat = useCallback(async (question: string, marks: number) => {
     const config: QuizConfig = {
       subject:     'Chat Question',
@@ -227,32 +312,23 @@ export function useQuiz() {
       timeMinutes: 10,
       mode:        'normal',
     };
-    const quizQuestion: QuizQuestion = {
-      id:       generateId(),
-      question,
-      marks,
-      type:     marks === 1 ? 'mcq' : 'written',
-      options:  marks === 1
-        ? ['A) Option 1', 'B) Option 2', 'C) Option 3', 'D) Option 4']
-        : undefined,
-    };
+    // Always use generateQuestions so MCQ options come from the backend
+    const qs = await generateQuestions(config, question);
     setCurrentQuiz({
       config,
-      questions: [quizQuestion],
-      answers:   [{ questionId: quizQuestion.id }],
+      questions: qs,
+      answers:   [{ questionId: qs[0].id }],
     });
     return config;
-  }, []);
+  }, [generateQuestions]);
 
-  // ════════════════════════════════════════════════════════════════════════
-  //  New standalone helpers (used by QuizPage submit flow)
-  // ════════════════════════════════════════════════════════════════════════
+  // ── Standalone helpers used by QuizPage submit flow ─────────────────────
   async function generateQuiz(config: QuizSetupConfig) {
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${API}/api/quiz/generate`, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           topic:              config.topic,
@@ -275,7 +351,7 @@ export function useQuiz() {
     setError(null);
     try {
       const res = await fetch(`${API}/api/quiz/evaluate`, {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ answers }),
       });
@@ -294,9 +370,7 @@ export function useQuiz() {
     setError(null);
   }
 
-  // ── return ────────────────────────────────────────────────────────────────
   return {
-    // existing
     quizResults,
     currentQuiz,
     isGenerating,
@@ -305,7 +379,6 @@ export function useQuiz() {
     evaluateQuiz,
     startQuizFromChat,
     setCurrentQuiz,
-    // new
     questions,
     result,
     loading,

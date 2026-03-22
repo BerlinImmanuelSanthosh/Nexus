@@ -6,12 +6,20 @@ import jsPDF from 'jspdf';
 
 interface MessageBubbleProps {
   message: Message;
+  userQuestion?: string;   // the user message that triggered this AI response
   onExpand?: (message: Message) => void;
   onTakeTest?: (question: string) => void;
   onRoadmap?: (subject: string) => void;
 }
 
-const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: MessageBubbleProps) => {
+// ── Click-hint sentences that must NEVER appear in the PDF export ──────────
+const CLICK_HINT_TEXTS = [
+  '✨ Click this message to explore deeper',
+  '💡 Tap to expand and learn more',
+  '🔍 Click to dive deeper',
+];
+
+const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoadmap }: MessageBubbleProps) => {
   const isUser = message.role === 'user';
   const [copied, setCopied]               = useState(false);
   const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
@@ -26,17 +34,6 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
     return message.content.includes('<img') || message.content.includes('data:image');
   }, [message.content]);
 
-  const handleCopy = useCallback(async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!message.content) return;
-    const div = document.createElement('div');
-    div.innerHTML = formattedContent;
-    const plain = div.innerText.replace(/Here is a .*study schedule[\s\S]*/i, '').trim();
-    await navigator.clipboard.writeText(plain);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }, [formattedContent, message.content]);
-
   const isGreeting = useMemo(() => {
     const greetings = [
       'hello', 'hi', 'hey', 'good morning', 'good afternoon',
@@ -50,6 +47,50 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
       lower.includes('how may i assist')
     );
   }, [message.content]);
+
+  // ── BUG 3 FIX: Click hint shown at top & bottom of AI messages ────────────
+  const ClickHint = useCallback(() => {
+    if (isUser || isGreeting) return null;
+    return (
+      <div
+        className="click-hint-banner flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg
+                   bg-gradient-to-r from-primary/10 via-primary/20 to-primary/10
+                   border border-primary/25 select-none pointer-events-none
+                   animate-pulse-subtle"
+        style={{
+          background: 'linear-gradient(90deg, rgba(var(--primary-rgb,99,102,241),0.08), rgba(var(--primary-rgb,99,102,241),0.18), rgba(var(--primary-rgb,99,102,241),0.08))',
+          border: '1px solid rgba(var(--primary-rgb,99,102,241),0.3)',
+        }}
+        aria-hidden="true"
+      >
+        <Sparkles className="h-3 w-3 text-primary animate-spin-slow shrink-0" style={{ animationDuration: '4s' }} />
+        <span
+          className="text-xs font-semibold tracking-wide"
+          style={{
+            background: 'linear-gradient(90deg, hsl(var(--primary)), hsl(var(--primary) / 0.7), hsl(var(--primary)))',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            backgroundClip: 'text',
+          }}
+        >
+          ✨ Click this message to explore deeper
+        </span>
+        <Sparkles className="h-3 w-3 text-primary animate-spin-slow shrink-0" style={{ animationDuration: '4s', animationDirection: 'reverse' }} />
+      </div>
+    );
+  }, [isUser, isGreeting]);
+
+  // ── BUG 4 FIX: Strip click-hint text from PDF content ─────────────────────
+  const handleCopy = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!message.content) return;
+    const div = document.createElement('div');
+    div.innerHTML = formattedContent;
+    const plain = div.innerText.replace(/Here is a .*study schedule[\s\S]*/i, '').trim();
+    await navigator.clipboard.writeText(plain);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [formattedContent, message.content]);
 
   const handleBubbleClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -75,12 +116,41 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
 
   const handleRoadmap = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    const plain = message.content.replace(/<[^>]*>/g, '').replace(/\*\*/g, '');
-    const topic = plain.split(/[.\n]/)[0]?.trim().slice(0, 60) || 'Topic';
-    onRoadmap?.(topic);
-  }, [message.content, onRoadmap]);
 
-  // ── PDF GENERATION ────────────────────────────────────────────────────────
+    let subject = 'Topic';
+
+    if (userQuestion && userQuestion.trim().length > 0) {
+      // ── Use the actual user question — strip common filler words so we get
+      //    the bare subject: "explain python" → "python",
+      //    "what is machine learning" → "machine learning"
+      const fillerPattern = /^\s*(explain|what is|what are|tell me about|teach me|describe|define|how does|how do|notes on|summarize|give me|show me)\s+/i;
+      const cleaned = userQuestion
+        .replace(/<[^>]*>/g, '')           // strip any HTML
+        .replace(/\*\*/g, '')              // strip markdown bold
+        .replace(fillerPattern, '')        // strip leading filler verbs
+        .replace(/[?!.,;:]+$/, '')         // strip trailing punctuation
+        .trim()
+        .slice(0, 80);                     // cap length
+      if (cleaned.length > 1) subject = cleaned;
+    } else {
+      // Fallback: scan AI content for the first proper noun / capitalised phrase
+      // e.g. "Python is a language" → "Python"
+      const plain = message.content.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').trim();
+      // Try to grab the first capitalised word or short phrase (not "Introduction")
+      const introSkip = /^(introduction|overview|summary|welcome|here|in this|this lesson|today)/i;
+      const firstLine = plain.split(/[\n.]/)[0]?.trim() || '';
+      const capitalMatch = firstLine.match(/\b([A-Z][a-zA-Z+#.]*(?:\s+[A-Z][a-zA-Z+#.]*){0,3})\b/);
+      if (capitalMatch && !introSkip.test(capitalMatch[1])) {
+        subject = capitalMatch[1].slice(0, 80);
+      } else {
+        subject = firstLine.slice(0, 60) || 'Topic';
+      }
+    }
+
+    onRoadmap?.(subject);
+  }, [message.content, userQuestion, onRoadmap]);
+
+  // ── PDF GENERATION (BUG 4 FIX: excludes click-hint sentences) ────────────
   const handleConvertToPdf = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
 
@@ -97,7 +167,16 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
     };
 
     const toPlain = (html: string): string => {
-      return html
+      // BUG 4 FIX: Remove click-hint elements before converting to plain text
+      // Strip the entire .click-hint-banner div block (it's injected via JSX, not in innerHTML,
+      // but guard against any future server-side injection too)
+      let cleaned = html;
+      CLICK_HINT_TEXTS.forEach(hint => {
+        // Remove any line containing the hint phrase
+        cleaned = cleaned.split('\n').filter(line => !line.includes(hint)).join('\n');
+      });
+
+      return cleaned
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<\/(?:p|div|li|h[1-6]|tr|blockquote|pre)>/gi, '\n')
         .replace(/<[^>]+>/g, '')
@@ -119,6 +198,14 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
         .replace(/[^\x00-\xFF]/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .replace(/[ \t]+/g, ' ')
+        // BUG 4 FIX: Final pass — strip any remaining click-hint plain-text lines
+        .split('\n')
+        .filter(line => !CLICK_HINT_TEXTS.some(hint =>
+          line.trim().includes('Click this message') ||
+          line.trim().includes('Tap to expand') ||
+          line.trim().includes('Click to dive')
+        ))
+        .join('\n')
         .trim();
     };
 
@@ -177,7 +264,6 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
     doc.save('nexusai-response.pdf');
   }, [message.imageUrl, message.content]);
 
-  // ── Detect SVG data URL so we can render it at full natural size ──────────
   const isSvgImage = message.imageUrl?.startsWith('data:image/svg+xml');
 
   return (
@@ -221,14 +307,19 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
             )}
             onClick={handleBubbleClick}
           >
+            {/* ── BUG 3 FIX: Click hint ABOVE content ─────────────────────── */}
+            {!isUser && !isGreeting && (
+              <div className="mb-3">
+                <ClickHint />
+              </div>
+            )}
+
             {message.imageUrl && !isUser && !contentHasImage && (
               <div
                 data-image-container="true"
                 className="mb-3 overflow-hidden rounded-xl cursor-zoom-in relative group/img"
                 onClick={handleImageClick}
               >
-                {/* ── ONLY CHANGE: SVG gets w-full h-auto (natural size);    */}
-                {/*   regular images keep the original h-40 object-cover.     */}
                 <img
                   src={message.imageUrl}
                   alt=""
@@ -247,10 +338,18 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
                 </div>
               </div>
             )}
+
             <div
               className="whitespace-pre-wrap"
               dangerouslySetInnerHTML={{ __html: formattedContent }}
             />
+
+            {/* ── BUG 3 FIX: Click hint BELOW content ─────────────────────── */}
+            {!isUser && !isGreeting && (
+              <div className="mt-3">
+                <ClickHint />
+              </div>
+            )}
           </div>
 
           {isUser && (

@@ -85,22 +85,34 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest, onRoadmap }: ChatMe
           </div>
         </div>
       )}
+
       <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 py-6 scrollbar-thin">
-        {messages.map((message) => (
+        {messages.map((message, index) => (
           <MessageBubble
             key={message.id}
             message={message}
+            // Pass the preceding user message as the subject source for roadmap.
+            // For every assistant reply, messages[index - 1] is always the user
+            // question that triggered it — so "explain Python" → "Python",
+            // not "Introduction" from the first line of the AI response.
+            userQuestion={
+              message.role === 'assistant'
+                ? messages[index - 1]?.content
+                : undefined
+            }
             onExpand={handleExpand}
             onTakeTest={onTakeTest}
             onRoadmap={onRoadmap}
           />
         ))}
+
         {/* Streaming cursor shown while typing and last message is still being built */}
         {isTyping && messages.length > 0 && messages[messages.length - 1]?.role === 'assistant' && (
           <div className="flex gap-4 pl-12">
             <span className="inline-block h-4 w-1 animate-pulse bg-primary rounded-full" />
           </div>
         )}
+
         <div ref={bottomRef} />
       </div>
 
@@ -119,5 +131,4 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest, onRoadmap }: ChatMe
 });
 
 ChatMessages.displayName = 'ChatMessages';
-
 export default ChatMessages;

@@ -3,99 +3,149 @@ import { Roadmap, RoadmapLesson } from '@/types/roadmap';
 
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
+// Resource site definitions.
+// domain: if set → use Google "site:" search (always works for any topic)
+// base:   native search URL (used for video/MOOC sites that work reliably)
+const RESOURCE_SITES: Array<{
+  name: string;
+  domain: string | null;   // google site: domain, or null for native search
+  base: string;            // native search base URL
+  type: 'article' | 'video' | 'docs' | 'tutorial';
+}> = [
+  { name: 'W3Schools',      domain: 'w3schools.com',           base: 'https://www.w3schools.com/',                                type: 'tutorial'  },
+  { name: 'GeeksforGeeks',  domain: 'geeksforgeeks.org',       base: 'https://www.geeksforgeeks.org/',                            type: 'article'   },
+  { name: 'FreeCodeCamp',   domain: 'freecodecamp.org',        base: 'https://www.freecodecamp.org/news/',                        type: 'tutorial'  },
+  { name: 'MDN Web Docs',   domain: 'developer.mozilla.org',   base: 'https://developer.mozilla.org/en-US/search?q=',             type: 'docs'      },
+  { name: 'TutorialsPoint', domain: 'tutorialspoint.com',      base: 'https://www.tutorialspoint.com/',                           type: 'tutorial'  },
+  { name: 'YouTube',        domain: null,                       base: 'https://www.youtube.com/results?search_query=',             type: 'video'     },
+  { name: 'Khan Academy',   domain: null,                       base: 'https://www.khanacademy.org/search?page_search_query=',     type: 'video'     },
+  { name: 'Codecademy',     domain: 'codecademy.com',          base: 'https://www.codecademy.com/search?query=',                  type: 'tutorial'  },
+  { name: 'Real Python',    domain: 'realpython.com',          base: 'https://realpython.com/search/results/?q=',                 type: 'tutorial'  },
+  { name: 'Coursera',       domain: null,                       base: 'https://www.coursera.org/search?query=',                    type: 'tutorial'  },
+  { name: 'edX',            domain: null,                       base: 'https://www.edx.org/search?q=',                             type: 'tutorial'  },
+  { name: 'Javatpoint',     domain: 'javatpoint.com',          base: 'https://www.javatpoint.com/',                               type: 'tutorial'  },
+  { name: 'Programiz',      domain: 'programiz.com',           base: 'https://www.programiz.com/search?q=',                       type: 'tutorial'  },
+  { name: 'Dev.to',         domain: 'dev.to',                  base: 'https://dev.to/search?q=',                                  type: 'article'   },
+  { name: 'Stack Overflow', domain: 'stackoverflow.com',       base: 'https://stackoverflow.com/search?q=',                       type: 'docs'      },
+];
+
+/**
+ * Build the best URL for a site + query.
+ * - Sites with a domain → Google "site:" search (topic-specific, always works)
+ * - Video/MOOC sites   → their own native search URL
+ */
+function makeSiteUrl(domain: string | null, base: string, query: string): string {
+  const encoded = encodeURIComponent(query);
+  if (domain) {
+    // Google site: search guarantees on-topic results for any subject
+    return `https://www.google.com/search?q=${encoded}+site%3A${domain}`;
+  }
+  // Native search for YouTube, Khan Academy, Coursera, edX
+  return `${base}${encoded}`;
+}
+
+/** Build 15 guaranteed resources for a lesson, always including the subject */
+function buildFallbackResources(
+  lessonTitle: string,
+  subject: string,
+): RoadmapLesson['resources'] {
+  // Always prefix with subject so "Python Introduction and Basics"
+  // not just "Introduction and Basics" → correct site pages
+  const query = `${subject} ${lessonTitle}`;
+  return RESOURCE_SITES.map(site => ({
+    title: `${site.name} — ${lessonTitle}`,
+    url:   makeSiteUrl(site.domain, site.base, query),
+    type:  site.type,
+  }));
+}
+
+/** Pad an existing resource list to exactly 15, adding search-URL fallbacks */
+function padToFifteen(
+  existing: RoadmapLesson['resources'],
+  lessonTitle: string,
+  subject: string,
+): RoadmapLesson['resources'] {
+  if (existing.length >= 15) return existing.slice(0, 15);
+
+  const fallbacks  = buildFallbackResources(lessonTitle, subject);
+  const usedTitles = new Set(existing.map(r => r.title.toLowerCase()));
+  const extras     = fallbacks.filter(fb => !usedTitles.has(fb.title.toLowerCase()));
+  const combined   = [...existing, ...extras];
+  return combined.slice(0, 15);
+}
+
 export function useRoadmap() {
-  const [roadmaps, setRoadmaps] = useState<Roadmap[]>([]);
+  const [roadmaps, setRoadmaps]         = useState<Roadmap[]>([]);
   const [activeRoadmap, setActiveRoadmap] = useState<Roadmap | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [isGenerating, setIsGenerating]   = useState(false);
 
   const generateRoadmap = useCallback(async (subject: string) => {
     setIsGenerating(true);
     try {
-      const response = await fetch('http://localhost:8000/api/chat', {
-        method: 'POST',
+      // ── Call the dedicated /api/roadmap endpoint (NOT /api/chat) ──────
+      const response = await fetch('http://localhost:8000/api/roadmap', {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [
-            {
-              role: 'user',
-              content: `Create a detailed learning roadmap for "${subject}". Return ONLY a valid JSON array (no markdown, no backticks). Each object must have:
-- "title": short lesson name
-- "content": 2-3 paragraph explanation of what to learn
-- "searchQuery": a Google search query to find the best free online resources for this specific lesson (e.g. "python variables tutorial for beginners")
-- "resources": an array of 3-4 objects, each with "title" (resource name), "url" (real URL to a popular learning site like w3schools, MDN, freecodecamp, geeksforgeeks, tutorialspoint, youtube, khan academy, codecademy, realpython, etc.), and "type" (one of "article", "video", "docs", "tutorial")
-
-Include 8-12 lessons from beginner to advanced. Use REAL, working URLs from well-known educational websites. Example:
-[{"title":"Variables & Data Types","content":"Learn about...","searchQuery":"python variables tutorial","resources":[{"title":"W3Schools Python Variables","url":"https://www.w3schools.com/python/python_variables.asp","type":"tutorial"},{"title":"Python Variables - GeeksforGeeks","url":"https://www.geeksforgeeks.org/python-variables/","type":"article"}]}]`
-            }
-          ],
-          mode: 'simple_english'
-        }),
+        body:    JSON.stringify({ subject }),
       });
 
-      if (!response.ok) throw new Error('Failed to generate roadmap');
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${response.status}`);
+      }
 
-      const data = await response.json();
-      const responseText = data.response || '';
+      const data = await response.json();   // { lessons: [...] }
+      const rawLessons: Array<{
+        title: string;
+        content: string;
+        resources: Array<{ title: string; url: string; type: string }>;
+      }> = data.lessons || [];
 
-      let lessons: RoadmapLesson[] = [];
-      try {
-        const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          lessons = parsed.map((item: any) => ({
-            id: generateId(),
-            title: item.title || 'Untitled Lesson',
-            content: item.content || '',
-            finished: false,
-            resources: (item.resources || []).map((r: any) => ({
-              title: r.title || 'Resource',
-              url: r.url || '#',
-              type: r.type || 'article',
-            })),
+      // ── Map backend lessons → RoadmapLesson, guarantee 15 resources ───
+      const lessons: RoadmapLesson[] = rawLessons.map(item => {
+        const validResources = (item.resources ?? [])
+          .filter(r => r.url && r.url !== '#' && r.url.startsWith('http'))
+          .map(r => ({
+            title: r.title  || 'Resource',
+            url:   r.url,
+            type:  (['article', 'video', 'docs', 'tutorial'].includes(r.type)
+                      ? r.type
+                      : 'article') as RoadmapLesson['resources'][number]['type'],
           }));
-        }
-      } catch {
-        const lines = responseText.split(/\d+\.\s+/).filter(Boolean);
-        lessons = lines.slice(0, 12).map((line: string) => ({
-          id: generateId(),
-          title: line.split('\n')[0]?.trim().replace(/\*\*/g, '') || 'Lesson',
-          content: line.trim(),
-          finished: false,
-          resources: [],
-        }));
-      }
 
-      if (lessons.length === 0) {
-        lessons = [{
-          id: generateId(),
-          title: `Getting Started with ${subject}`,
-          content: responseText.slice(0, 500),
-          finished: false,
-          resources: [
-            { title: `Search: ${subject} tutorial`, url: `https://www.google.com/search?q=${encodeURIComponent(subject + ' tutorial for beginners')}`, type: 'article' },
-            { title: `${subject} - W3Schools`, url: `https://www.w3schools.com/`, type: 'tutorial' },
-          ],
-        }];
-      }
+        return {
+          id:        generateId(),
+          title:     item.title   || 'Untitled Lesson',
+          content:   item.content || '',
+          finished:  false,
+          // Always pad to exactly 15 resources
+          resources: padToFifteen(validResources, item.title, subject),
+        };
+      });
 
-      // For any lesson with no resources, add Google search fallback
-      lessons = lessons.map(l => ({
-        ...l,
-        resources: l.resources.length > 0 ? l.resources : [
-          { title: `Search: ${l.title}`, url: `https://www.google.com/search?q=${encodeURIComponent(l.title + ' tutorial')}`, type: 'article' as const },
-        ],
-      }));
+      // Guard: if somehow we still got nothing, show a generic fallback lesson
+      const finalLessons: RoadmapLesson[] =
+        lessons.length > 0
+          ? lessons
+          : [{
+              id:        generateId(),
+              title:     `Getting Started with ${subject}`,
+              content:   `Begin your learning journey with ${subject}. This lesson covers the basics you need to get started.`,
+              finished:  false,
+              resources: buildFallbackResources(`Getting Started`, subject),
+            }];
 
       const roadmap: Roadmap = {
-        id: generateId(),
+        id:        generateId(),
         subject,
-        lessons,
+        lessons:   finalLessons,
         createdAt: new Date(),
       };
 
       setRoadmaps(prev => [roadmap, ...prev]);
       setActiveRoadmap(roadmap);
       return roadmap;
+
     } catch (error) {
       console.error('Roadmap generation error:', error);
       return null;
@@ -105,24 +155,15 @@ Include 8-12 lessons from beginner to advanced. Use REAL, working URLs from well
   }, []);
 
   const toggleLessonFinished = useCallback((roadmapId: string, lessonId: string) => {
-    setRoadmaps(prev => prev.map(r => {
-      if (r.id !== roadmapId) return r;
-      return {
-        ...r,
-        lessons: r.lessons.map(l =>
-          l.id === lessonId ? { ...l, finished: !l.finished } : l
-        ),
-      };
-    }));
-    setActiveRoadmap(prev => {
-      if (!prev || prev.id !== roadmapId) return prev;
-      return {
-        ...prev,
-        lessons: prev.lessons.map(l =>
-          l.id === lessonId ? { ...l, finished: !l.finished } : l
-        ),
-      };
-    });
+    const toggle = (lessons: RoadmapLesson[]) =>
+      lessons.map(l => l.id === lessonId ? { ...l, finished: !l.finished } : l);
+
+    setRoadmaps(prev =>
+      prev.map(r => r.id !== roadmapId ? r : { ...r, lessons: toggle(r.lessons) })
+    );
+    setActiveRoadmap(prev =>
+      !prev || prev.id !== roadmapId ? prev : { ...prev, lessons: toggle(prev.lessons) }
+    );
   }, []);
 
   return {
