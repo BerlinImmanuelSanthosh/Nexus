@@ -213,6 +213,17 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
               <span>Take Test</span>
             </button>
           )}
+
+          {!isUser && !isGreeting && (
+            <button
+              onClick={handleConvertToPdf}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors py-1"
+              title="Download as PDF"
+            >
+              <FileDown className="h-3 w-3" />
+              <span>Save as PDF</span>
+            </button>
+          )}
         </div>
 
         {/* Build Your Roadmap - standalone button below message */}
