@@ -15,6 +15,7 @@ import RoadmapView from '@/components/roadmap/RoadmapView';
 import { QuizConfig, QuizResult } from '@/types/quiz';
 import { cn } from '@/lib/utils';
 import { Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 
 const AnimatedBackground = lazy(() => import('@/components/ui/AnimatedBackground'));
 
@@ -35,6 +36,8 @@ const Index = () => {
     setActiveConversationId,
     createNewConversation,
     sendMessage,
+    uploadFile,
+    clearFile,
     deleteConversation,
   } = useChat();
 
@@ -58,6 +61,29 @@ const Index = () => {
 
   const handleIntroComplete = useCallback(() => setShowIntro(false), []);
   const handleToggleSidebar = useCallback(() => setSidebarOpen(prev => !prev), []);
+
+  // ── File upload handler — sends file to backend ─────────────────────────
+  const handleFileUpload = useCallback(async (file: File) => {
+    const toastId = toast.loading(`Uploading ${file.name}...`);
+    try {
+      const success = await uploadFile(file);
+      toast.dismiss(toastId);
+      if (success) {
+        toast.success(`✅ ${file.name} ready — ask questions about it!`);
+      } else {
+        toast.error(`❌ Failed to upload ${file.name}. Try again.`);
+      }
+    } catch (err) {
+      toast.dismiss(toastId);
+      toast.error(`❌ Upload failed. Is the backend running?`);
+    }
+  }, [uploadFile]);
+
+  // ── Clear file handler ──────────────────────────────────────────────────
+  const handleClearFile = useCallback(async () => {
+    await clearFile();
+    toast.success('File removed from memory');
+  }, [clearFile]);
 
   const handleStartQuiz = useCallback(async (config: QuizConfig) => {
     await startQuiz(config, chatQuestion ?? undefined);
@@ -109,8 +135,14 @@ const Index = () => {
   const renderContent = () => {
     switch (currentView) {
       case 'quiz-setup':
-        return <QuizSetup onStart={handleStartQuiz} onBack={() => { setCurrentView('chat'); setChatQuestion(null); }} chatQuestion={chatQuestion} />;
-      
+        return (
+          <QuizSetup
+            onStart={handleStartQuiz}
+            onBack={() => { setCurrentView('chat'); setChatQuestion(null); }}
+            chatQuestion={chatQuestion}
+          />
+        );
+
       case 'quiz':
         if (isQuizGenerating) {
           return (
@@ -134,7 +166,7 @@ const Index = () => {
           );
         }
         return null;
-      
+
       case 'quiz-results':
         if (latestResult) {
           return (
@@ -146,7 +178,7 @@ const Index = () => {
           );
         }
         return null;
-      
+
       case 'performance':
         return (
           <PerformanceTracker
@@ -191,17 +223,27 @@ const Index = () => {
             isGenerating={isRoadmapGenerating}
           />
         );
-      
+
       default:
         return (
           <>
-            <ChatMessages messages={messages} isTyping={isTyping} onTakeTest={handleTakeTestFromChat} onRoadmap={handleRoadmapFromChat} />
+            <ChatMessages
+              messages={messages}
+              isTyping={isTyping}
+              onTakeTest={handleTakeTestFromChat}
+              onRoadmap={handleRoadmapFromChat}
+            />
             <div className="border-t border-border bg-background/80 p-4 backdrop-blur-sm">
               <div className={cn(
                 "mx-auto transition-all duration-300",
                 sidebarOpen ? "max-w-3xl" : "max-w-4xl"
               )}>
-                <ChatInput onSend={sendMessage} disabled={isTyping} />
+                {/* ── onFileUpload now wired to handleFileUpload ── */}
+                <ChatInput
+                  onSend={sendMessage}
+                  onFileUpload={handleFileUpload}
+                  disabled={isTyping}
+                />
                 <p className="mt-2 text-center text-xs text-muted-foreground">
                   NexusAI can make mistakes. Consider checking important information.
                 </p>
@@ -217,7 +259,7 @@ const Index = () => {
       <Suspense fallback={null}>
         <AnimatedBackground />
       </Suspense>
-      
+
       <Sidebar
         conversations={conversations}
         activeId={activeConversationId}

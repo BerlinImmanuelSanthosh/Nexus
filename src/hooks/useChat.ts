@@ -30,6 +30,36 @@ export function useChat() {
     }
   }, [activeConversationId]);
 
+  // ── Upload file to backend ──────────────────────────────────────────────
+  const uploadFile = useCallback(async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const response = await fetch('http://localhost:8000/api/upload-file', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+      if (data.success) {
+        return true;
+      } else {
+        return false;
+      }
+    } catch (error) {
+      console.error('File upload error:', error);
+      return false;
+    }
+  }, []);
+
+  // ── Clear file from backend memory ─────────────────────────────────────
+  const clearFile = useCallback(async () => {
+    try {
+      await fetch('http://localhost:8000/api/clear-file', { method: 'POST' });
+    } catch (error) {
+      console.error('Clear file error:', error);
+    }
+  }, []);
+
   const sendMessage = useCallback(async (content: string) => {
     let conversationId = activeConversationId;
 
@@ -63,7 +93,6 @@ export function useChat() {
 
     const aiMessageId = generateId();
 
-    // Create an empty assistant message for streaming
     const aiMessage: Message = {
       id: aiMessageId,
       content: '',
@@ -79,7 +108,6 @@ export function useChat() {
 
     try {
       const currentConversation = conversations.find(c => c.id === conversationId);
-
       const isReExplain = content.toLowerCase().includes('reexplain');
 
       let messagesForBackend;
@@ -106,7 +134,6 @@ export function useChat() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      // Try streaming first
       if (response.body) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -118,13 +145,11 @@ export function useChat() {
           done = readerDone;
           if (value) {
             const chunk = decoder.decode(value, { stream: true });
-            
-            // Try to parse as JSON (non-streaming backend)
+
             try {
               const parsed = JSON.parse(fullText + chunk);
               if (parsed.response) {
                 fullText = parsed.response;
-                // Update in one go
                 setConversations(prev => prev.map(c =>
                   c.id === conversationId
                     ? {
@@ -139,10 +164,8 @@ export function useChat() {
                 break;
               }
             } catch {
-              // Not JSON yet or streaming - accumulate and show progressively
               fullText += chunk;
-              
-              // Check if we have SSE data lines
+
               if (chunk.includes('data: ')) {
                 const lines = chunk.split('\n');
                 for (const line of lines) {
@@ -159,8 +182,7 @@ export function useChat() {
                   }
                 }
               }
-              
-              // Progressive update
+
               const displayText = fullText.replace(/^data: .*$/gm, '').replace(/\[DONE\]/g, '').trim();
               if (displayText) {
                 setConversations(prev => prev.map(c =>
@@ -179,10 +201,8 @@ export function useChat() {
           }
         }
 
-        // Final: add image
         const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
         const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
-
         setConversations(prev => prev.map(c =>
           c.id === conversationId
             ? {
@@ -195,11 +215,9 @@ export function useChat() {
             : c
         ));
       } else {
-        // Fallback: no streaming body
         const data = await response.json();
         const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
         const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
-
         setConversations(prev => prev.map(c =>
           c.id === conversationId
             ? {
@@ -216,7 +234,6 @@ export function useChat() {
       }
     } catch (error) {
       console.error('Chat error:', error);
-
       setConversations(prev => prev.map(c =>
         c.id === conversationId
           ? {
@@ -243,6 +260,8 @@ export function useChat() {
     setActiveConversationId,
     createNewConversation,
     sendMessage,
+    uploadFile,
+    clearFile,
     deleteConversation,
   };
 }
