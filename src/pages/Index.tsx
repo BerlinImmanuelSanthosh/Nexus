@@ -228,6 +228,10 @@ const Index = () => {
         onToggle={handleToggleSidebar}
         currentView={currentView}
         onViewChange={handleViewChange}
+        quizResults={quizResults}
+        onSelectQuizResult={handleSelectQuizResult}
+        roadmaps={roadmaps}
+        onSelectRoadmap={handleSelectRoadmap}
       />
 
       <main className="flex flex-1 flex-col overflow-hidden">
