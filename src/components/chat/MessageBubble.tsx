@@ -136,7 +136,6 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
             )}
           </button>
 
-          {/* Take Test button - only on non-greeting AI messages */}
           {!isUser && !isGreeting && onTakeTest && (
             <button
               onClick={handleTakeTest}
@@ -147,19 +146,20 @@ const MessageBubble = memo(({ message, onExpand, onTakeTest, onRoadmap }: Messag
               <span>Take Test</span>
             </button>
           )}
+        </div>
 
-          {/* Roadmap button - only on non-greeting AI messages */}
-          {!isUser && !isGreeting && onRoadmap && (
+        {/* Build Your Roadmap - standalone button below message */}
+        {!isUser && !isGreeting && onRoadmap && (
+          <div className={cn("px-12", "self-start")}>
             <button
               onClick={handleRoadmap}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-emerald-500 transition-colors py-1"
-              title="Generate a learning roadmap"
+              className="flex items-center gap-2 mt-1 px-4 py-2 text-xs font-medium rounded-xl bg-primary/10 text-primary hover:bg-primary/20 border border-primary/20 hover:border-primary/40 transition-all"
             >
-              <Map className="h-3 w-3" />
-              <span>Roadmap</span>
+              <Map className="h-3.5 w-3.5" />
+              <span>Build Your Roadmap</span>
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </>
   );

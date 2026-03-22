@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Mic, MicOff, Plus } from 'lucide-react';
+import { Send, Mic, MicOff, Plus, X, FileText, FileImage, File as FileIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -16,9 +16,16 @@ interface ChatInputProps {
   disabled?: boolean;
 }
 
+const getFileIcon = (type: string) => {
+  if (type === 'application/pdf') return <FileText className="h-4 w-4 text-red-400" />;
+  if (type.startsWith('image/')) return <FileImage className="h-4 w-4 text-blue-400" />;
+  return <FileIcon className="h-4 w-4 text-muted-foreground" />;
+};
+
 const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
   const [input, setInput] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -70,6 +77,7 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
     if (input.trim() && !disabled) {
       onSend(input.trim());
       setInput('');
+      setAttachedFile(null);
     }
   };
 
@@ -156,12 +164,27 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
       return;
     }
     onFileUpload?.(file);
+    setAttachedFile(file);
     toast.success(`Attached: ${file.name}`);
     e.target.value = '';
   };
 
   return (
     <div className="relative">
+      {/* Attached file indicator */}
+      {attachedFile && (
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-secondary border border-border animate-fade-in">
+          {getFileIcon(attachedFile.type)}
+          <span className="text-xs font-medium text-foreground truncate max-w-[200px]">{attachedFile.name}</span>
+          <span className="text-xs text-muted-foreground">({(attachedFile.size / 1024).toFixed(1)} KB)</span>
+          <button
+            onClick={() => setAttachedFile(null)}
+            className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {/* Mic recording indicator */}
       {isRecording && (
         <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-destructive/10 border border-destructive/30 animate-fade-in">
