@@ -16,9 +16,16 @@ interface ChatInputProps {
   disabled?: boolean;
 }
 
+const getFileIcon = (type: string) => {
+  if (type === 'application/pdf') return <FileText className="h-4 w-4 text-red-400" />;
+  if (type.startsWith('image/')) return <FileImage className="h-4 w-4 text-blue-400" />;
+  return <FileIcon className="h-4 w-4 text-muted-foreground" />;
+};
+
 const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
   const [input, setInput] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
