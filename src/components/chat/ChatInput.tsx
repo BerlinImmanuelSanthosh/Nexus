@@ -171,6 +171,20 @@ const ChatInput = ({ onSend, onFileUpload, disabled }: ChatInputProps) => {
 
   return (
     <div className="relative">
+      {/* Attached file indicator */}
+      {attachedFile && (
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-secondary border border-border animate-fade-in">
+          {getFileIcon(attachedFile.type)}
+          <span className="text-xs font-medium text-foreground truncate max-w-[200px]">{attachedFile.name}</span>
+          <span className="text-xs text-muted-foreground">({(attachedFile.size / 1024).toFixed(1)} KB)</span>
+          <button
+            onClick={() => setAttachedFile(null)}
+            className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {/* Mic recording indicator */}
       {isRecording && (
         <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-destructive/10 border border-destructive/30 animate-fade-in">
