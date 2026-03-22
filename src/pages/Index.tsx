@@ -48,10 +48,12 @@ const Index = () => {
   } = useQuiz();
 
   const {
+    roadmaps,
     activeRoadmap,
     isGenerating: isRoadmapGenerating,
     generateRoadmap,
     toggleLessonFinished,
+    setActiveRoadmap,
   } = useRoadmap();
 
   const handleIntroComplete = useCallback(() => setShowIntro(false), []);
@@ -89,6 +91,16 @@ const Index = () => {
     setCurrentView('roadmap');
     await generateRoadmap(subject);
   }, [generateRoadmap]);
+
+  const handleSelectQuizResult = useCallback((result: QuizResult) => {
+    setLatestResult(result);
+    setCurrentView('quiz-results');
+  }, []);
+
+  const handleSelectRoadmap = useCallback((roadmap: any) => {
+    setActiveRoadmap(roadmap);
+    setCurrentView('roadmap');
+  }, [setActiveRoadmap]);
 
   if (showIntro) {
     return <IntroAnimation onComplete={handleIntroComplete} />;
@@ -216,6 +228,10 @@ const Index = () => {
         onToggle={handleToggleSidebar}
         currentView={currentView}
         onViewChange={handleViewChange}
+        quizResults={quizResults}
+        onSelectQuizResult={handleSelectQuizResult}
+        roadmaps={roadmaps}
+        onSelectRoadmap={handleSelectRoadmap}
       />
 
       <main className="flex flex-1 flex-col overflow-hidden">

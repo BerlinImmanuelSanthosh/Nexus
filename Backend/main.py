@@ -4,6 +4,7 @@ import io
 import json
 import base64
 import requests
+import hashlib
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,7 +19,7 @@ try:
     print("✓ googletrans loaded successfully")
 except ImportError:
     TRANSLATOR_AVAILABLE = False
-    print("✗ googletrans not installed. Install with: pip install googletrans==4.0.0rc1")
+    print("✗ googletrans not installed.")
 
 try:
     import fitz  # PyMuPDF
@@ -26,7 +27,24 @@ try:
     print("✓ PyMuPDF loaded successfully")
 except ImportError:
     PYMUPDF_AVAILABLE = False
-    print("✗ PyMuPDF not installed. Install with: pip install pymupdf")
+    print("✗ PyMuPDF not installed.")
+
+try:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    OCR_AVAILABLE = True
+    print("✓ OCR (pdf2image + pytesseract) loaded successfully")
+except ImportError:
+    OCR_AVAILABLE = False
+    print("✗ OCR libraries not installed.")
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+    print("✓ Pillow loaded successfully")
+except ImportError:
+    PIL_AVAILABLE = False
+    print("✗ Pillow not installed. Install with: pip install Pillow")
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -37,6 +55,28 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CX      = os.getenv("GOOGLE_CX", "")
 
 app = FastAPI(title="NexusAI Chatbot")
+
+# ── Allow up to 100MB uploads ─────────────────────────────────────────────────
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, max_body_size: int):
+        super().__init__(app)
+        self.max_body_size = max_body_size
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > self.max_body_size:
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                {"detail": f"File too large. Maximum allowed size is {self.max_body_size // (1024*1024)}MB."},
+                status_code=413
+            )
+        return await call_next(request)
+
+app.add_middleware(MaxBodySizeMiddleware, max_body_size=100 * 1024 * 1024)  # 100MB
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8080", "http://localhost:5173"],
@@ -44,7 +84,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_file_context: dict = {"text": "", "filename": "", "type": ""}
+
+# ── Enhanced in-memory file context store ─────────────────────────────────────
+_file_context: dict = {
+    "text":      "",
+    "filename":  "",
+    "type":      "",
+    "structure": [],
+    "chunks":    [],
+    "full_text": ""
+}
 
 
 # ── Models ───────────────────────────────────────────────────────────────────
@@ -74,67 +123,403 @@ def get_groq_client():
 # ════════════════════════════════════════════════════════════════════════════
 
 def clean_llm_response(text: str) -> str:
-    # Remove markdown image tags
     text = re.sub(r'!\[[^\]]*\]\([^\)]*\)', '', text)
-    # Convert ## Heading → **Heading** style (bold, title case, no ALL-CAPS)
     text = re.sub(r'^#{1,6}\s+(.+)$', lambda m: f"\n{m.group(1).strip()}\n", text, flags=re.MULTILINE)
-    # Remove leftover bold markers that might come from LLM
     text = re.sub(r'\*\*(.+?)\*\*', lambda m: m.group(1), text)
     return text.strip()
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  HELPERS: FILE EXTRACTION
+#  HELPERS: FILE EXTRACTION (FULL with OCR fallback)
 # ════════════════════════════════════════════════════════════════════════════
 
-def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
-    if not PYMUPDF_AVAILABLE:
-        return ""
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        parts = [page.get_text() for page in doc]
-        doc.close()
-        return "\n".join(parts).strip()
-    except Exception as e:
-        print(f"⚠ PDF extraction error: {e}")
-        return ""
-
-
-def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
+def describe_image_bytes_with_groq(image_bytes: bytes, mime_type: str = "image/png", context_hint: str = "") -> str:
+    """
+    Send any image bytes to Groq vision and get a text description.
+    Used for both standalone image uploads and images embedded inside PDFs.
+    """
     try:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
+        prompt_text = (
+            "You are reading a page or image from an educational PDF document. "
+            "Extract ALL visible text exactly as written — headings, paragraphs, bullet points, "
+            "tables, labels, captions, and any text in diagrams. "
+            "After the text, describe any diagrams, charts, or figures in detail. "
+            "Be thorough — this output will be used to answer student questions."
+        )
+        if context_hint:
+            prompt_text += f" Context: {context_hint}"
+
         comp = get_groq_client().chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
-                    {"type": "text", "text": (
-                        "Describe this image in full detail. "
-                        "Extract any visible text, labels, diagrams, tables, or data. "
-                        "Be thorough so this description can be used to answer user questions."
-                    )}
+                    {"type": "text", "text": prompt_text}
                 ]
             }],
-            temperature=0.1, max_tokens=1500,
+            temperature=0.1,
+            max_tokens=2000,
         )
         return comp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"⚠ Image description error: {e}")
+        print(f"⚠ Vision description error: {e}")
         return ""
+
+@app.get("/api/file-status")
+async def file_status():
+    """Returns what file is currently loaded in memory."""
+    return {
+        "has_file": bool(_file_context.get("text")),
+        "filename": _file_context.get("filename", ""),
+        "chars":    len(_file_context.get("text", "")),
+        "chunks":   len(_file_context.get("chunks", [])),
+    }
+    
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
+    """
+    Full pipeline with timeout protection for large PDFs (up to 100MB).
+    - Direct text extraction for all pages
+    - Vision OCR only for pages with NO text (scanned pages)
+    - Embedded image vision for content-rich images > 5KB
+    - Skips vision on pages that already have good text (saves time on large PDFs)
+    """
+    if not PYMUPDF_AVAILABLE:
+        print("⚠ PyMuPDF not available")
+        return ""
+
+    all_pages_text = []
+
+    try:
+        doc         = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_pages = len(doc)
+        file_size_mb = len(pdf_bytes) / (1024 * 1024)
+        print(f"📄 PDF: {total_pages} pages, {file_size_mb:.1f}MB")
+
+        # For large PDFs (>20MB), skip embedded image vision to avoid timeout
+        # Only do full vision on scanned/empty pages
+        is_large_pdf = file_size_mb > 20
+
+        for page_num in range(total_pages):
+            page         = doc[page_num]
+            page_label   = f"--- Page {page_num + 1} ---"
+            page_content = []
+
+            # ── Step 1: Direct text extraction ───────────────────────────
+            raw_text = page.get_text().strip()
+            if raw_text:
+                page_content.append(raw_text)
+                print(f"  ✅ Page {page_num+1}: {len(raw_text)} chars (direct text)")
+
+            # ── Step 2: Embedded images — only for small/medium PDFs ──────
+            if not is_large_pdf:
+                image_list = page.get_images(full=True)
+                if image_list:
+                    print(f"  🖼 Page {page_num+1}: {len(image_list)} embedded image(s)")
+                    for img_index, img_info in enumerate(image_list):
+                        try:
+                            xref       = img_info[0]
+                            base_image = doc.extract_image(xref)
+                            img_bytes  = base_image["image"]
+                            img_ext    = base_image["ext"]
+                            mime_type  = f"image/{img_ext}" if img_ext != "jpg" else "image/jpeg"
+
+                            if len(img_bytes) < 5120:
+                                continue
+
+                            print(f"    ↳ Image {img_index+1}: {len(img_bytes)//1024}KB — sending to vision")
+                            img_description = describe_image_bytes_with_groq(
+                                img_bytes,
+                                mime_type,
+                                context_hint=f"Page {page_num+1} of PDF"
+                            )
+                            if img_description:
+                                page_content.append(f"[IMAGE {img_index+1} on Page {page_num+1}]:\n{img_description}")
+
+                        except Exception as img_err:
+                            print(f"    ↳ Image error: {img_err}")
+                            continue
+
+            # ── Step 3: Scanned page (no text) → render + vision OCR ─────
+            if not raw_text:
+                try:
+                    print(f"  🖼 Page {page_num+1}: no text — rendering for vision OCR")
+                    mat      = fitz.Matrix(2.0, 2.0)
+                    pix      = page.get_pixmap(matrix=mat)
+                    img_data = pix.tobytes("png")
+
+                    # Only send to vision if image is meaningful size
+                    if len(img_data) > 10240:
+                        page_vision_text = describe_image_bytes_with_groq(
+                            img_data,
+                            "image/png",
+                            context_hint=f"Full page {page_num+1} scan from PDF"
+                        )
+                        if page_vision_text:
+                            page_content.append(f"[PAGE {page_num+1} SCAN]:\n{page_vision_text}")
+                            print(f"  ✅ Page {page_num+1}: vision extracted {len(page_vision_text)} chars")
+
+                except Exception as render_err:
+                    print(f"  ⚠ Page {page_num+1} render error: {render_err}")
+                    # Pytesseract fallback
+                    if OCR_AVAILABLE:
+                        try:
+                            from pdf2image import convert_from_bytes as c2i
+                            images = c2i(pdf_bytes, first_page=page_num+1, last_page=page_num+1)
+                            if images:
+                                ocr_text = pytesseract.image_to_string(images[0]).strip()
+                                if ocr_text:
+                                    page_content.append(f"[PAGE {page_num+1} OCR]:\n{ocr_text}")
+                        except Exception as ocr_err:
+                            print(f"  ⚠ OCR error: {ocr_err}")
+
+            if page_content:
+                all_pages_text.append(f"{page_label}\n" + "\n\n".join(page_content))
+            else:
+                print(f"  ❌ Page {page_num+1}: no content extracted")
+
+        doc.close()
+
+    except Exception as e:
+        print(f"⚠ PDF processing error: {e}")
+        import traceback; traceback.print_exc()
+        return ""
+
+    full_text = "\n\n".join(all_pages_text).strip()
+    print(f"\n📊 Total extracted: {len(full_text)} chars across {total_pages} pages")
+    return full_text
+
+
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str]:
+    """
+    Fine-grained chunks for accurate topic retrieval.
+    Preserves page boundaries so answers stay page-aware.
+    """
+    # Split on page markers first to preserve page context
+    page_sections = re.split(r'(--- Page \d+ ---)', text)
+    
+    all_chunks = []
+    current_page_label = ""
+
+    for section in page_sections:
+        if re.match(r'--- Page \d+ ---', section.strip()):
+            current_page_label = section.strip()
+            continue
+
+        if not section.strip():
+            continue
+
+        words = section.split()
+        if not words:
+            continue
+
+        # If section is small enough, keep as one chunk with page label
+        if len(words) <= chunk_size:
+            chunk = f"{current_page_label}\n{section.strip()}" if current_page_label else section.strip()
+            all_chunks.append(chunk)
+            continue
+
+        # Split large sections into overlapping chunks
+        i = 0
+        while i < len(words):
+            chunk_words = words[i:min(i + chunk_size, len(words))]
+            chunk_text_content = ' '.join(chunk_words)
+            chunk = f"{current_page_label}\n{chunk_text_content}" if current_page_label else chunk_text_content
+            all_chunks.append(chunk)
+            i += (chunk_size - overlap)
+
+    print(f"📚 Created {len(all_chunks)} page-aware chunks from {len(text.split())} words")
+    return all_chunks
+
+
+def extract_document_structure(text: str) -> list:
+    """
+    Detect headings, unit markers, and numbered sections.
+    """
+    lines    = text.split("\n")
+    headings = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.isupper() and 3 < len(stripped) < 100:
+            headings.append(stripped)
+        if re.match(r'(UNIT|CHAPTER)\s+[IVX\d]+', stripped, re.IGNORECASE):
+            headings.append(stripped)
+        if re.match(r'^\d+\.\s+[A-Z]', stripped):
+            headings.append(stripped)
+    return list(dict.fromkeys(headings))
+
+
+def find_relevant_chunks(question: str, chunks: List[str], top_k: int = 5) -> List[str]:
+    if not chunks:
+        return []
+
+    question_lower = question.lower()
+    key_phrase     = question_lower.replace('what is','').replace('explain','').replace('describe','').strip()
+    stop_words     = ['what','why','how','when','where','which','who','whom',
+                      'the','and','for','with','this','that','these','those',
+                      'can','could','will','would','should','tell','explain',
+                      'describe','define','list','give','provide','show','please',
+                      'is','are','was','were','be','been','have','has','had',
+                      'given','pdf','file','document','page']
+    key_words = [w for w in key_phrase.split() if len(w) > 2 and w not in stop_words]
+
+    if not key_words:
+        key_words = [w for w in re.findall(r'\b[a-z]{3,}\b', question_lower) if w not in stop_words]
+
+    print(f"🔑 Key search terms: {key_words}")
+
+    scored_chunks = []
+    for i, chunk in enumerate(chunks):
+        chunk_lower = chunk.lower()
+        score       = 0
+
+        # Exact phrase match — highest priority
+        if key_phrase in chunk_lower:
+            score += 200
+
+        # Individual keyword hits
+        for keyword in key_words:
+            count  = chunk_lower.count(keyword)
+            score += count * 10
+
+        # Definition/explanation patterns
+        for pattern in [r'is a', r'are used', r'refers to', r'defined as', r'means',
+                        r'consists of', r'comprises', r'includes', r'contains',
+                        r'purpose of', r'function of', r'used for', r'designed to',
+                        r'stores', r'format', r'structure', r'type of']:
+            if re.search(pattern, chunk_lower):
+                score += 15
+                break
+
+        # Content richness
+        if re.search(r'[•\-*\d+\.]', chunk):        score += 10
+        if len(chunk) > 300:                          score += 20
+        if len(chunk) > 800:                          score += 20
+        if len(re.findall(r'[.!?]+', chunk)) >= 3:   score += 10
+        if len(chunk) < 50:                           score -= 30
+
+        # Keyword proximity bonus
+        positions = [chunk_lower.find(kw) for kw in key_words if chunk_lower.find(kw) != -1]
+        if len(positions) > 1:
+            positions.sort()
+            avg_dist = (positions[-1] - positions[0]) / len(positions)
+            if avg_dist < 300:
+                score += 30
+
+        scored_chunks.append((score, i, chunk))
+
+    scored_chunks.sort(reverse=True)
+
+    # Take top_k chunks that scored above 0
+    results = [c for s, _, c in scored_chunks[:top_k] if s > 0]
+
+    # If still weak results, include neighboring chunks for context
+    if results:
+        top_indices = [i for s, i, c in scored_chunks[:top_k] if s > 0]
+        neighbor_chunks = []
+        for idx in top_indices:
+            if idx > 0 and chunks[idx - 1] not in results:
+                neighbor_chunks.append(chunks[idx - 1])
+            if idx < len(chunks) - 1 and chunks[idx + 1] not in results:
+                neighbor_chunks.append(chunks[idx + 1])
+        # Add neighbors up to top_k total
+        for nc in neighbor_chunks:
+            if len(results) >= top_k + 2:
+                break
+            results.append(nc)
+
+    if not results:
+        print("⚠ No relevant chunks found, using first 3 chunks as fallback")
+        results = chunks[:3]
+
+    print(f"✅ Returning {len(results)} relevant chunks")
+    return results
 
 
 def answer_from_file_context(user_question: str, file_text: str, filename: str) -> Optional[str]:
     if not file_text or len(file_text.strip()) < 20:
         return None
-    trimmed = file_text[:6000]
-    system_prompt = (
-        "You are NexusAI File Analyst. "
-        "Answer the user's question ONLY from the FILE CONTENT provided. "
-        "If the answer is present, reply clearly and concisely. "
-        "If the answer is NOT present in the file, reply with exactly: NOT_IN_FILE"
+
+    print(f"\n🔍 Searching for: '{user_question}'")
+    print(f"📚 Document: {len(file_text)} chars, {len(_file_context.get('chunks', []))} chunks")
+
+    user_question_lower = user_question.lower()
+
+    # Structure query shortcut
+    structure_keywords = ['topics', 'syllabus', 'outline', 'contents', 'units',
+                          'chapters', 'what are the topics', 'list of topics', 'course outline']
+    if any(kw in user_question_lower for kw in structure_keywords):
+        if _file_context.get("structure"):
+            return "Document Structure:\n" + "\n".join(_file_context["structure"])
+
+    chunks = _file_context.get("chunks", [])
+
+    if chunks:
+        relevant_chunks = find_relevant_chunks(user_question, chunks, top_k=6)
+        context = "\n\n---\n\n".join(relevant_chunks)
+    else:
+        context = file_text[:8000]
+
+    # If context is thin, widen to more of the document
+    if len(context) < 1000 and len(file_text) > 1000:
+        print("⚠ Context too thin — widening search to full document excerpt")
+        # Search entire file text directly for the keyword
+        key_terms = [w for w in user_question_lower.split()
+                     if len(w) > 3 and w not in ['what','explain','define','describe','given','file','pdf','document','page','the','and','for']]
+        best_pos  = -1
+        for term in key_terms:
+            pos = file_text.lower().find(term)
+            if pos != -1:
+                best_pos = pos
+                break
+        if best_pos != -1:
+            start   = max(0, best_pos - 500)
+            end     = min(len(file_text), best_pos + 4000)
+            context = file_text[start:end]
+            print(f"📍 Found keyword at pos {best_pos}, using chars {start}:{end}")
+        else:
+            context = file_text[:8000]
+
+    print(f"📤 Context length sent to LLM: {len(context)} chars")
+
+    content_keywords = ['what is', 'explain', 'describe', 'define', 'meaning',
+                        'concept', 'how does', 'how it works', 'working',
+                        'function', 'purpose', 'details']
+    wants_content = any(kw in user_question_lower for kw in content_keywords)
+
+    if wants_content:
+        system_prompt = (
+            "You are NexusAI File Analyst. The user wants a DETAILED EXPLANATION of a topic from the file. "
+            "Read ALL the provided file content carefully and thoroughly. "
+            "Find every sentence, paragraph, bullet point, or section that discusses the requested topic. "
+            "Combine all found information into a complete, well-structured answer. "
+            "Even if the topic is mentioned briefly in multiple places, gather all mentions and explain fully. "
+            "Do NOT say 'not mentioned' or 'not explained' unless you have carefully checked the ENTIRE content. "
+            "If the answer is truly absent from the file content, reply with exactly: NOT_IN_FILE"
+        )
+    else:
+        system_prompt = (
+            "You are NexusAI File Analyst. "
+            "Read ALL the provided file content carefully and find the answer to the user's question. "
+            "Provide a complete and accurate answer using everything relevant in the file. "
+            "If the answer is truly not present in the file, reply with exactly: NOT_IN_FILE"
+        )
+
+    user_msg = (
+        f"FILE: {filename}\n\n"
+        f"FILE CONTENT (read every part carefully):\n{context}\n\n"
+        f"USER QUESTION: {user_question}\n\n"
+        f"STRICT INSTRUCTIONS:\n"
+        f"1. Read the ENTIRE file content above — do not skip any section\n"
+        f"2. Find ALL mentions and explanations of the topic in the file\n"
+        f"3. Give a COMPLETE answer combining everything found\n"
+        f"4. If a section heading matches the topic, read what follows it carefully\n"
+        f"5. Only say NOT_IN_FILE if the topic is completely absent from the content above"
     )
-    user_msg = f"FILE: {filename}\n\nFILE CONTENT:\n{trimmed}\n\nUSER QUESTION: {user_question}"
+
     try:
         comp = get_groq_client().chat.completions.create(
             model="openai/gpt-oss-20b",
@@ -142,16 +527,70 @@ def answer_from_file_context(user_question: str, file_text: str, filename: str) 
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_msg},
             ],
-            temperature=0.1, max_tokens=800,
+            temperature=0.1,
+            max_tokens=2000,
         )
         answer = comp.choices[0].message.content.strip()
         if answer.upper().startswith("NOT_IN_FILE"):
-            return None
+            print("❌ NOT_IN_FILE — attempting full-document fallback scan")
+            # Last resort: send a larger slice of the whole document
+            fallback_context = file_text[:12000]
+            fallback_msg = (
+                f"FILE: {filename}\n\n"
+                f"FULL DOCUMENT (first 12000 chars):\n{fallback_context}\n\n"
+                f"USER QUESTION: {user_question}\n\n"
+                f"Find and explain the topic from the document. If truly absent, say: NOT_IN_FILE"
+            )
+            comp2 = get_groq_client().chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": fallback_msg},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            answer = comp2.choices[0].message.content.strip()
+            if answer.upper().startswith("NOT_IN_FILE"):
+                print("❌ Final NOT_IN_FILE — topic genuinely absent")
+                return None
+
+        print(f"✅ Answer found ({len(answer)} chars)")
         return clean_llm_response(answer)
     except Exception as e:
         print(f"⚠ file-context answer error: {e}")
         return None
 
+
+def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
+    """
+    Handles standalone image uploads (not PDF-embedded images).
+    Extracts all visible text, diagrams, tables, and data from the image.
+    """
+    try:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        comp = get_groq_client().chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                    {"type": "text", "text": (
+                        "You are reading a standalone image uploaded by a user. "
+                        "Describe this image in full detail. "
+                        "Extract ALL visible text, labels, diagrams, tables, or data exactly as written. "
+                        "After the text, describe any diagrams, charts, or figures in detail. "
+                        "Be thorough so this description can be used to answer user questions."
+                    )}
+                ]
+            }],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        return comp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"⚠ Image description error: {e}")
+        return ""
 
 # ════════════════════════════════════════════════════════════════════════════
 #  ENDPOINT: /api/upload-file
@@ -161,46 +600,90 @@ def answer_from_file_context(user_question: str, file_text: str, filename: str) 
 async def upload_file(file: UploadFile = File(...)):
     global _file_context
     try:
-        content_type = file.content_type or ""
-        filename     = file.filename or "uploaded_file"
-        file_bytes   = await file.read()
+        content_type   = file.content_type or ""
+        filename       = file.filename or "uploaded_file"
+
+        print(f"\n📁 Reading upload: {filename}")
+
+        # Stream read in 1MB chunks to handle large files efficiently
+        file_bytes = b""
+        chunk_size = 1024 * 1024  # 1MB per read
+        max_size   = 100 * 1024 * 1024  # 100MB hard limit
+
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            file_bytes += chunk
+            if len(file_bytes) > max_size:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File exceeds 100MB limit. Please upload a smaller file."
+                )
+
+        print(f"📊 File size: {len(file_bytes) / (1024*1024):.2f}MB")
+        print(f"📋 Content type: {content_type}")
+
         extracted_text = ""
         file_type      = ""
+        structure      = []
+        chunks         = []
 
         if "pdf" in content_type or filename.lower().endswith(".pdf"):
             file_type      = "pdf"
             extracted_text = extract_text_from_pdf_bytes(file_bytes)
             if not extracted_text:
-                return {"success": False, "message": "Could not extract text from PDF.", "chars_extracted": 0}
+                return {
+                    "success": False,
+                    "message": "Could not extract text from PDF. It may be corrupted.",
+                    "chars_extracted": 0
+                }
+            chunks    = chunk_text(extracted_text, chunk_size=800, overlap=150)
+            structure = extract_document_structure(extracted_text)
+
         elif content_type.startswith("image/"):
             file_type      = "image"
-            extracted_text = describe_image_with_groq(file_bytes, content_type)
+            extracted_text = describe_image_bytes_with_groq(file_bytes, content_type)
             if not extracted_text:
                 return {"success": False, "message": "Could not analyse the image.", "chars_extracted": 0}
+            chunks = [extracted_text]
+
         else:
             raise HTTPException(status_code=400, detail="Unsupported file type. Upload a PDF or image.")
 
-        _file_context["text"]     = extracted_text
-        _file_context["filename"] = filename
-        _file_context["type"]     = file_type
+        _file_context["text"]      = extracted_text
+        _file_context["full_text"] = extracted_text
+        _file_context["filename"]  = filename
+        _file_context["type"]      = file_type
+        _file_context["chunks"]    = chunks
+        _file_context["structure"] = structure
 
         preview = extracted_text[:200].replace("\n", " ")
         return {
-            "success": True, "filename": filename, "file_type": file_type,
-            "chars_extracted": len(extracted_text), "preview": preview,
-            "message": f"✅ File '{filename}' uploaded and analysed successfully."
+            "success":            True,
+            "filename":           filename,
+            "file_type":          file_type,
+            "chars_extracted":    len(extracted_text),
+            "chunks_created":     len(chunks),
+            "structure_detected": len(structure),
+            "preview":            preview,
+            "message":            (
+                f"✅ File '{filename}' uploaded successfully "
+                f"({len(file_bytes)//(1024*1024) or 1}MB, "
+                f"{len(extracted_text)} chars, {len(chunks)} chunks)."
+            )
         }
+
     except HTTPException:
         raise
     except Exception as e:
         import traceback; print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail="File processing failed.")
-
-
+        raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
+    
 @app.post("/api/clear-file")
 async def clear_file():
     global _file_context
-    _file_context = {"text": "", "filename": "", "type": ""}
+    _file_context = {"text": "", "filename": "", "type": "", "structure": [], "chunks": [], "full_text": ""}
     return {"success": True, "message": "File context cleared."}
 
 
@@ -210,33 +693,25 @@ async def clear_file():
 
 _FILLER_WORDS = re.compile(
     r'\b('
-    # Request verbs / phrases
     r'explain|what is|what are|how does|how do|how is|describe|define|'
     r'tell me about|teach me about|teach me|give me|get me|show me|'
     r'write|create|generate|make|prepare|provide|list|'
-    # Study material nouns
     r'notes|note|summary|summaries|overview|introduction|guide|tutorial|'
     r'material|materials|content|syllabus|curriculum|topics|'
-    # Quantity / format words
     r'detailed|detail|details|in detail|in depth|comprehensive|brief|short|simple|simply|'
     r'full|complete|all|important|key|main|basic|basics|advanced|'
     r'for beginners|'
-    # Institution / exam context words
     r'university|college|school|institute|institution|academy|'
     r'anna university|vtu|jntu|mumbai university|madras university|'
     r'board|exam|examination|exams|test|quiz|'
     r'semester|sem|year|grade|class|std|standard|'
     r'1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th|11th|12th|'
     r'regulation|reg|pattern|scheme|'
-    # Common filler
     r'about|the|a|an|in|with|and|or|of|to|on|'
     r'for|from|by|at|as|is|are|was|were|be|been|'
-    # Quantity words
     r'marks|mark|pages|page|points|point|words|word|'
-    # Language names
     r'tamil|hindi|english|telugu|malayalam|kannada|bengali|marathi|'
     r'french|german|spanish|arabic|chinese|japanese|korean|'
-    # Action words
     r'compare|discuss|state|name'
     r')\b',
     re.IGNORECASE
@@ -247,11 +722,9 @@ def get_clean_topic_from_message(user_message: str) -> str:
     clean = re.sub(r'\b\d+\b', ' ', clean)
     clean = re.sub(r'[?.,!;:\'"()]', ' ', clean)
     clean = re.sub(r'\s+', ' ', clean).strip()
-
     if len(clean) < 2:
         words = user_message.split()
         clean = ' '.join(words[:3])
-
     print(f"📌 Clean topic for image: '{clean}'")
     return clean.lower()
 
@@ -296,23 +769,19 @@ def search_google_images(query: str, num_results: int = 3) -> List[str]:
 
 def get_image_for_topic(user_message: str) -> str:
     msg_lower = user_message.lower()
-    
-    no_image_keywords = ['who is', 'famous person', 'actor', 'actress', 'singer', 
+
+    no_image_keywords = ['who is', 'famous person', 'actor', 'actress', 'singer',
                          'person', 'individual', 'somebody', 'someone',
                          'formula', 'equation', 'derivation', 'proof']
-    
     for keyword in no_image_keywords:
         if keyword in msg_lower:
-            print(f"📵 Skipping image for personal/abstract query: '{keyword}'")
             return ""
-    
+
     topic = get_clean_topic_from_message(user_message)
-    
     if len(topic) < 3:
         return ""
-    
+
     image_type = "diagram"
-    
     if any(word in msg_lower for word in ['architecture', 'structure', 'components', 'parts', 'layers']):
         image_type = "architecture diagram"
     elif any(word in msg_lower for word in ['flow', 'process', 'working', 'how it works', 'algorithm']):
@@ -331,12 +800,10 @@ def get_image_for_topic(user_message: str) -> str:
         image_type = "concept illustration"
     else:
         image_type = "educational diagram"
-    
+
     query = f"{topic} {image_type}"
-    
-    generic_topics = ['python', 'java', 'c++', 'javascript', 'html', 'css', 
+    generic_topics = ['python', 'java', 'c++', 'javascript', 'html', 'css',
                       'sql', 'database', 'network', 'security', 'ai', 'ml']
-    
     if topic in generic_topics:
         if image_type == "architecture diagram":
             query = f"{topic} programming language architecture diagram"
@@ -344,16 +811,13 @@ def get_image_for_topic(user_message: str) -> str:
             query = f"{topic} code flow diagram example"
         else:
             query = f"{topic} programming concept illustration"
-    
+
     print(f"🔍 Contextual image query: '{query}'")
-    
     urls = search_google_images(query, num_results=3)
-    
     if not urls:
         simpler_query = f"{topic} diagram"
-        print(f"⚠ No results, trying simpler: '{simpler_query}'")
         urls = search_google_images(simpler_query, num_results=3)
-    
+
     return urls[0] if urls else ""
 
 
@@ -372,7 +836,6 @@ def create_html_with_image(text_response: str, image_url: str, topic: str) -> st
 </div>'''
 
     content_style = 'style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;line-height:1.7;"'
-
     return f'''<div style="font-family:'Segoe UI',Arial,sans-serif;color:white;">
 {image_html}
 <div {content_style}>{text_response}</div>
@@ -384,17 +847,13 @@ def create_html_with_image(text_response: str, image_url: str, topic: str) -> st
 # ════════════════════════════════════════════════════════════════════════════
 
 def extract_user_context(user_message: str) -> str:
-    msg_lower = user_message.lower()
-
+    msg_lower   = user_message.lower()
     wants_notes = bool(re.search(
         r'\bnotes?\b|\bsummary\b|\bsummaries\b|\boverview\b|\bguide\b|\btutorial\b', msg_lower
     ))
-
     context_match = re.search(
-        r'\b(?:for|as per|according to|based on|per|following)\b\s*(.{3,60})',
-        msg_lower
+        r'\b(?:for|as per|according to|based on|per|following)\b\s*(.{3,60})', msg_lower
     )
-
     context_phrase = ""
     if context_match:
         raw = context_match.group(1).strip()
@@ -416,7 +875,6 @@ def extract_user_context(user_message: str) -> str:
             "Format as structured notes: use numbered points and sub-points, "
             "short crisp sentences, key terms in Title Case — not long paragraphs."
         )
-
     return "\n".join(parts)
 
 
@@ -706,8 +1164,8 @@ def detect_mode_from_message(msg_lower: str) -> Tuple[str, int]:
 
 def process_detailed_response_without_schedule(user_message: str, messages: List[dict]) -> str:
     user_context = extract_user_context(user_message)
-    msg_lower  = user_message.lower()
-    page_match = PAGE_PATTERN.search(msg_lower)
+    msg_lower    = user_message.lower()
+    page_match   = PAGE_PATTERN.search(msg_lower)
     if page_match:
         pages      = int(page_match.group(1))
         word_count = calculate_word_count_from_pages(pages)
@@ -806,7 +1264,6 @@ async def explain_like_child(request: ChildTeachRequest):
     try:
         topic    = request.topic
         language = request.language
-
         system_prompt = (
             f"You are NexusAI explaining '{topic}' to a 5-year-old child.\n"
             f"Extremely simple words, fun analogies. Short sentences (max 10 words each). "
@@ -822,7 +1279,6 @@ async def explain_like_child(request: ChildTeachRequest):
             temperature=0.6, max_tokens=2000, top_p=0.95,
         )
         response_text = clean_llm_response(comp.choices[0].message.content.strip())
-
         return {"response": f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;font-family:\'Segoe UI\',Arial,sans-serif;color:white;">{response_text}</div>'}
 
     except Exception as e:
@@ -855,10 +1311,10 @@ async def chat(request: ChatRequest):
 
         user_context = extract_user_context(latest_user_msg)
 
-        skip_image_keywords = ['who', 'person', 'famous', 'actor', 'actress', 
+        skip_image_keywords = ['who', 'person', 'famous', 'actor', 'actress',
                                'singer', 'politician', 'celebrity']
         skip_image = any(keyword in english_query.lower() for keyword in skip_image_keywords)
-        
+
         image_url = ""
         if not skip_image and len(english_query) > 10:
             image_url = get_image_for_topic(english_query)
@@ -960,7 +1416,7 @@ async def chat(request: ChatRequest):
                         {"role":"system","content":system_prompt},
                         {"role":"user","content":f"{current_point_count} points each:\n{questions_text}"}
                     ],
-                    temperature=0.1, max_tokens=4000, top_p=0.85,           
+                    temperature=0.1, max_tokens=4000, top_p=0.85,
                 )
                 response_text = clean_llm_response(comp.choices[0].message.content.strip())
                 if image_url:
@@ -1009,7 +1465,6 @@ async def chat(request: ChatRequest):
 
         if image_url:
             return {"response": file_prefix + create_html_with_image(processed_response, image_url, english_query)}
-
         return {"response": file_prefix + f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{processed_response}</div>'}
 
     except Exception as e:
@@ -1025,7 +1480,7 @@ class QuizGenerateRequest(BaseModel):
     topic: str
     num_questions: int = 5
     marks_per_question: int = 2
-    difficulty: str = "medium"   # easy | medium | hard
+    difficulty: str = "medium"
 
 class QuizAnswerItem(BaseModel):
     question_id: str
@@ -1080,7 +1535,6 @@ async def quiz_generate(request: QuizGenerateRequest):
 
 # ════════════════════════════════════════════════════════════════════════════
 #  ENDPOINT: /api/quiz/evaluate
-#  Awards marks per question but NEVER exceeds max_marks for that question.
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/quiz/evaluate")
@@ -1094,7 +1548,6 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
             "Respond ONLY with a valid JSON array — no markdown, no extra text. "
             "Each object must have: question_id, awarded_marks (int, 0 to max_marks), feedback (1-2 sentences)."
         )
-
         items_text = "\n\n".join([
             f"Question ID: {a.question_id}\n"
             f"Question: {a.question}\n"
@@ -1102,13 +1555,11 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
             f"Student answer: {a.student_answer or '[No answer provided]'}"
             for a in request.answers
         ])
-
         user_prompt = (
             f"Evaluate these answers and return a JSON array:\n\n{items_text}\n\n"
             f"Return ONLY JSON like: "
             f'[{{"question_id":"q1","awarded_marks":2,"feedback":"Good definition but missed one key point."}}]'
         )
-
         comp = get_groq_client().chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
@@ -1122,19 +1573,18 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
         raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
         evaluations = json.loads(raw)
 
-        # Hard cap — LLM can NEVER exceed threshold
         max_marks_map = {a.question_id: a.max_marks for a in request.answers}
         for ev in evaluations:
             cap = max_marks_map.get(ev["question_id"], 0)
             ev["awarded_marks"] = max(0, min(int(ev["awarded_marks"]), cap))
-            ev["max_marks"] = cap
+            ev["max_marks"]     = cap
 
         total_awarded  = sum(ev["awarded_marks"] for ev in evaluations)
         total_possible = sum(a.max_marks for a in request.answers)
 
         return {
-            "evaluations": evaluations,
-            "total_awarded": total_awarded,
+            "evaluations":    evaluations,
+            "total_awarded":  total_awarded,
             "total_possible": total_possible,
         }
     except Exception as e:
