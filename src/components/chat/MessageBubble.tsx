@@ -1,7 +1,8 @@
 import { Message } from '@/types/chat';
-import { User, Sparkles, Copy, Check, ClipboardList, X, Map } from 'lucide-react';
+import { User, Sparkles, Copy, Check, ClipboardList, X, Map, FileDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useMemo, memo, useState, useCallback } from 'react';
+import jsPDF from 'jspdf';
 
 interface MessageBubbleProps {
   message: Message;
