@@ -259,7 +259,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
 
       {/* Confirmation Dialog */}
       <Dialog open={showConfirm} onOpenChange={setShowConfirm}>
-        <DialogContent>
+        <DialogContent className="z-[100]" onPointerDownOutside={(e) => e.preventDefault()}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-destructive" />
@@ -271,7 +271,12 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowConfirm(false)}>Cancel</Button>
-            <Button onClick={handleSubmitConfirmed} className="bg-primary text-primary-foreground">Yes, Submit</Button>
+            <Button 
+              onClick={() => handleSubmitConfirmed()} 
+              className="bg-primary text-primary-foreground relative z-[101]"
+            >
+              {submitLoading ? 'Submitting...' : 'Yes, Submit'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
