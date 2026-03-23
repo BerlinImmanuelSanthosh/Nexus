@@ -92,61 +92,60 @@ export function QuizResultsBackend({ result, onRetry }: QuizResultsBackendProps)
   const grade = getGrade();
 
   return (
-    <div className="p-6 max-w-3xl mx-auto space-y-6">
+    <div className="flex flex-1 flex-col overflow-y-auto h-full">
+      <div className="p-6 max-w-3xl mx-auto space-y-6 w-full">
 
-      {/* Total score card */}
-      <div className="rounded-xl border border-white/10 bg-white/5 p-6 text-center">
-        <p className="text-sm text-gray-400 mb-1">Your Score</p>
-        <p className="text-5xl font-bold text-white">
-          {result.total_awarded}
-          <span className="text-2xl text-gray-400"> / {result.total_possible}</span>
-        </p>
-        <p className={`mt-2 text-lg font-semibold ${grade.color}`}>
-          {grade.label} — {percentage}%
-        </p>
-      </div>
+        {/* Total score card */}
+        <div className="rounded-xl border border-border bg-secondary/30 p-6 text-center">
+          <p className="text-sm text-muted-foreground mb-1">Your Score</p>
+          <p className="text-5xl font-bold text-foreground">
+            {result.total_awarded}
+            <span className="text-2xl text-muted-foreground"> / {result.total_possible}</span>
+          </p>
+          <p className={`mt-2 text-lg font-semibold ${grade.color}`}>
+            {grade.label} — {percentage}%
+          </p>
+        </div>
 
-      {/* Per-question breakdown */}
-      <div className="space-y-4">
-        {result.evaluations.map((ev, i) => (
-          <div
-            key={ev.question_id}
-            className="rounded-xl border border-white/10 bg-white/5 p-5 space-y-2"
-          >
-            {/* Question */}
-            <p className="text-sm text-gray-400">Question {i + 1}</p>
-            <p className="text-white font-medium">{ev.question}</p>
-
-            {/* Marks badge */}
-            <div className="flex items-center gap-2">
-              <span
-                className={`text-sm font-semibold px-3 py-1 rounded-full ${
-                  ev.awarded_marks === ev.max_marks
-                    ? "bg-green-500/20 text-green-400"
-                    : ev.awarded_marks === 0
-                    ? "bg-red-500/20 text-red-400"
-                    : "bg-yellow-500/20 text-yellow-400"
-                }`}
-              >
-                {ev.awarded_marks} / {ev.max_marks} marks
-              </span>
+        {/* Per-question breakdown */}
+        <div className="space-y-4">
+          {result.evaluations.map((ev, i) => (
+            <div
+              key={ev.question_id}
+              className="rounded-xl border border-border bg-secondary/20 p-5 space-y-2"
+            >
+              <p className="text-sm text-muted-foreground">Question {i + 1}</p>
+              <p className="text-foreground font-medium">{ev.question}</p>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`text-sm font-semibold px-3 py-1 rounded-full ${
+                    ev.awarded_marks === ev.max_marks
+                      ? "bg-primary/20 text-primary"
+                      : ev.awarded_marks === 0
+                      ? "bg-destructive/20 text-destructive"
+                      : "bg-yellow-500/20 text-yellow-500"
+                  }`}
+                >
+                  {ev.awarded_marks} / {ev.max_marks} marks
+                </span>
+              </div>
+              <p className="text-sm text-muted-foreground border-l-2 border-border pl-3">
+                {ev.feedback}
+              </p>
             </div>
+          ))}
+        </div>
 
-            {/* AI feedback */}
-            <p className="text-sm text-gray-300 border-l-2 border-white/20 pl-3">
-              {ev.feedback}
-            </p>
-          </div>
-        ))}
+        {/* Retry button */}
+        <div className="pb-8">
+          <button
+            onClick={onRetry}
+            className="w-full py-3 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-semibold transition"
+          >
+            Try Another Quiz
+          </button>
+        </div>
       </div>
-
-      {/* Retry button */}
-      <button
-        onClick={onRetry}
-        className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold transition"
-      >
-        Try Another Quiz
-      </button>
     </div>
   );
 }
