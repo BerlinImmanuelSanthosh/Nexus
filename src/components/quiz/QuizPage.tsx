@@ -79,6 +79,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
   }, [onSubmit, questions, onUpdateAnswer]);
 
   const handleSubmitConfirmed = useCallback(async () => {
+    setShowConfirm(false); // close dialog immediately
     // 1. Flush all editor data
     questions.forEach(q => {
       if (q.type === 'written') {
