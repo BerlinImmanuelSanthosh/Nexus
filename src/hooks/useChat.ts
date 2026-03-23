@@ -30,6 +30,85 @@ export function useChat() {
     }
   }, [activeConversationId]);
 
+  // ── Explain Like a Child ────────────────────────────────────────────────
+  const explainLikeChild = useCallback(async (topic: string, language: string = 'en') => {
+    let conversationId = activeConversationId;
+
+    if (!conversationId) {
+      const newConversation: Conversation = {
+        id: generateId(),
+        title: topic.slice(0, 30) + (topic.length > 30 ? '...' : ''),
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      setConversations(prev => [newConversation, ...prev]);
+      setActiveConversationId(newConversation.id);
+      conversationId = newConversation.id;
+    }
+
+    setIsTyping(true);
+
+    const aiMessageId = generateId();
+    const aiMessage: Message = {
+      id: aiMessageId,
+      content: '',
+      role: 'assistant',
+      timestamp: new Date(),
+      isChildExplain: true,
+    };
+
+    setConversations(prev => prev.map(c =>
+      c.id === conversationId
+        ? { ...c, messages: [...c.messages, aiMessage], updatedAt: new Date() }
+        : c
+    ));
+
+    try {
+      const response = await fetch('http://localhost:8000/api/explain-like-child', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, language }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+      const data = await response.json();
+
+      setConversations(prev => prev.map(c =>
+        c.id === conversationId
+          ? {
+              ...c,
+              messages: c.messages.map(m =>
+                m.id === aiMessageId
+                  ? { ...m, content: data.response, isChildExplain: true }
+                  : m
+              ),
+              updatedAt: new Date(),
+            }
+          : c
+      ));
+    } catch (error) {
+      console.error('Explain like child error:', error);
+      setConversations(prev => prev.map(c =>
+        c.id === conversationId
+          ? {
+              ...c,
+              messages: c.messages.map(m =>
+                m.id === aiMessageId
+                  ? { ...m, content: 'Failed to get a response. Is the backend running?' }
+                  : m
+              ),
+              updatedAt: new Date(),
+            }
+          : c
+      ));
+    } finally {
+      setIsTyping(false);
+    }
+  }, [activeConversationId]);
+
+  // ── Main sendMessage (streaming) ────────────────────────────────────────
   const sendMessage = useCallback(async (content: string) => {
     let conversationId = activeConversationId;
 
@@ -63,7 +142,6 @@ export function useChat() {
 
     const aiMessageId = generateId();
 
-    // Create an empty assistant message for streaming
     const aiMessage: Message = {
       id: aiMessageId,
       content: '',
@@ -93,7 +171,6 @@ export function useChat() {
           .map(msg => ({ role: msg.role, content: msg.content }));
       }
 
-      // ── STREAMING endpoint ──────────────────────────────────────────────
       const response = await fetch('http://localhost:8000/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -119,12 +196,9 @@ export function useChat() {
           done = readerDone;
 
           if (value) {
-            // Accumulate in buffer so split SSE lines are handled correctly
             buffer += decoder.decode(value, { stream: true });
 
-            // Process every complete line in the buffer
             const lines = buffer.split('\n');
-            // Keep the last (possibly incomplete) line in the buffer
             buffer = lines.pop() ?? '';
 
             for (const line of lines) {
@@ -138,7 +212,6 @@ export function useChat() {
                 const parsed = JSON.parse(jsonStr);
 
                 if (parsed.type === 'token' && parsed.content) {
-                  // Append token and update message in real time
                   streamedText += parsed.content;
                   const snapshot = streamedText;
                   setConversations(prev => prev.map(c =>
@@ -154,8 +227,25 @@ export function useChat() {
                   ));
                 }
 
+                if (parsed.type === 'prefix' && parsed.content) {
+                  const prefixContent = parsed.content;
+                  setConversations(prev => prev.map(c =>
+                    c.id === conversationId
+                      ? {
+                          ...c,
+                          messages: c.messages.map(m =>
+                            m.id === aiMessageId
+                              ? { ...m, content: prefixContent + (m.content || '') }
+                              : m
+                          ),
+                          updatedAt: new Date(),
+                        }
+                      : c
+                  ));
+                  streamedText = prefixContent + streamedText;
+                }
+
                 if (parsed.type === 'image' && parsed.url) {
-                  // Attach image when backend sends it
                   const imageUrl = parsed.url;
                   setConversations(prev => prev.map(c =>
                     c.id === conversationId
@@ -182,7 +272,6 @@ export function useChat() {
           }
         }
       } else {
-        // Fallback: no streaming body
         const data = await response.json();
         const keywords = content.split(/\s+/).filter(w => w.length > 2).slice(0, 3).join('+');
         const imageUrl = `https://loremflickr.com/800/400/${encodeURIComponent(keywords)}`;
@@ -230,6 +319,7 @@ export function useChat() {
     setActiveConversationId,
     createNewConversation,
     sendMessage,
+    explainLikeChild,
     deleteConversation,
   };
 }

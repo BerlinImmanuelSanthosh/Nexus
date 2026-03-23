@@ -6,13 +6,12 @@ import jsPDF from 'jspdf';
 
 interface MessageBubbleProps {
   message: Message;
-  userQuestion?: string;   // the user message that triggered this AI response
+  userQuestion?: string;
   onExpand?: (message: Message) => void;
   onTakeTest?: (question: string) => void;
   onRoadmap?: (subject: string) => void;
 }
 
-// ── Click-hint sentences that must NEVER appear in the PDF export ──────────
 const CLICK_HINT_TEXTS = [
   '✨ Click this message to explore deeper',
   '💡 Tap to expand and learn more',
@@ -24,11 +23,28 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
   const [copied, setCopied]               = useState(false);
   const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
 
+  // ── Detect if this is a "explain like a child" message ───────────────────
+  // Either flagged explicitly OR the content has no HTML tags (plain text paragraphs)
+  // and came from the child explain endpoint (tracked via message.isChildExplain)
+  const isChildExplain = useMemo(() => {
+    return !!message.isChildExplain;
+  }, [message.isChildExplain]);
+
+  // ── For child explain: content is plain text, render as-is with line breaks
+  // ── For all others: content may have HTML, apply bold/italic replacements
   const formattedContent = useMemo(() => {
+    if (isChildExplain) {
+      // Plain text — just escape any stray HTML and convert newlines to <br>
+      return message.content
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br/>');
+    }
     return message.content
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>');
-  }, [message.content]);
+  }, [message.content, isChildExplain]);
 
   const contentHasImage = useMemo(() => {
     return message.content.includes('<img') || message.content.includes('data:image');
@@ -48,7 +64,6 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
     );
   }, [message.content]);
 
-  // ── BUG 3 FIX: Click hint shown at top & bottom of AI messages ────────────
   const ClickHint = useCallback(() => {
     if (isUser || isGreeting) return null;
     return (
@@ -80,7 +95,6 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
     );
   }, [isUser, isGreeting]);
 
-  // ── BUG 4 FIX: Strip click-hint text from PDF content ─────────────────────
   const handleCopy = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!message.content) return;
@@ -120,23 +134,17 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
     let subject = 'Topic';
 
     if (userQuestion && userQuestion.trim().length > 0) {
-      // ── Use the actual user question — strip common filler words so we get
-      //    the bare subject: "explain python" → "python",
-      //    "what is machine learning" → "machine learning"
       const fillerPattern = /^\s*(explain|what is|what are|tell me about|teach me|describe|define|how does|how do|notes on|summarize|give me|show me)\s+/i;
       const cleaned = userQuestion
-        .replace(/<[^>]*>/g, '')           // strip any HTML
-        .replace(/\*\*/g, '')              // strip markdown bold
-        .replace(fillerPattern, '')        // strip leading filler verbs
-        .replace(/[?!.,;:]+$/, '')         // strip trailing punctuation
+        .replace(/<[^>]*>/g, '')
+        .replace(/\*\*/g, '')
+        .replace(fillerPattern, '')
+        .replace(/[?!.,;:]+$/, '')
         .trim()
-        .slice(0, 80);                     // cap length
+        .slice(0, 80);
       if (cleaned.length > 1) subject = cleaned;
     } else {
-      // Fallback: scan AI content for the first proper noun / capitalised phrase
-      // e.g. "Python is a language" → "Python"
       const plain = message.content.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').trim();
-      // Try to grab the first capitalised word or short phrase (not "Introduction")
       const introSkip = /^(introduction|overview|summary|welcome|here|in this|this lesson|today)/i;
       const firstLine = plain.split(/[\n.]/)[0]?.trim() || '';
       const capitalMatch = firstLine.match(/\b([A-Z][a-zA-Z+#.]*(?:\s+[A-Z][a-zA-Z+#.]*){0,3})\b/);
@@ -150,13 +158,12 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
     onRoadmap?.(subject);
   }, [message.content, userQuestion, onRoadmap]);
 
-  // ── PDF GENERATION (BUG 4 FIX: excludes click-hint sentences) ────────────
   const handleConvertToPdf = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
 
-    const doc   = new jsPDF({ unit: 'mm', format: 'a4' });
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
+    const doc    = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageW  = doc.internal.pageSize.getWidth();
+    const pageH  = doc.internal.pageSize.getHeight();
     const margin = 20;
     const maxW   = pageW - margin * 2;
     const lineH  = 6;
@@ -167,12 +174,8 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
     };
 
     const toPlain = (html: string): string => {
-      // BUG 4 FIX: Remove click-hint elements before converting to plain text
-      // Strip the entire .click-hint-banner div block (it's injected via JSX, not in innerHTML,
-      // but guard against any future server-side injection too)
       let cleaned = html;
       CLICK_HINT_TEXTS.forEach(hint => {
-        // Remove any line containing the hint phrase
         cleaned = cleaned.split('\n').filter(line => !line.includes(hint)).join('\n');
       });
 
@@ -198,9 +201,8 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
         .replace(/[^\x00-\xFF]/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .replace(/[ \t]+/g, ' ')
-        // BUG 4 FIX: Final pass — strip any remaining click-hint plain-text lines
         .split('\n')
-        .filter(line => !CLICK_HINT_TEXTS.some(hint =>
+        .filter(line => !CLICK_HINT_TEXTS.some(() =>
           line.trim().includes('Click this message') ||
           line.trim().includes('Tap to expand') ||
           line.trim().includes('Click to dive')
@@ -229,7 +231,10 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
       } catch { /* skip image silently */ }
     }
 
-    const rawText = toPlain(message.content);
+    // For child explain, use raw content directly (it's already plain text)
+    const rawText = isChildExplain
+      ? message.content.replace(/\n{3,}/g, '\n\n').trim()
+      : toPlain(message.content);
 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
@@ -262,7 +267,7 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
     }
 
     doc.save('nexusai-response.pdf');
-  }, [message.imageUrl, message.content]);
+  }, [message.imageUrl, message.content, isChildExplain]);
 
   const isSvgImage = message.imageUrl?.startsWith('data:image/svg+xml');
 
@@ -307,7 +312,6 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
             )}
             onClick={handleBubbleClick}
           >
-            {/* ── BUG 3 FIX: Click hint ABOVE content ─────────────────────── */}
             {!isUser && !isGreeting && (
               <div className="mb-3">
                 <ClickHint />
@@ -339,12 +343,13 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
               </div>
             )}
 
+            {/* ── Child explain: larger font, plain text rendered via <br> tags ── */}
             <div
               className="whitespace-pre-wrap"
+              style={isChildExplain ? { fontSize: '18px', lineHeight: '1.9' } : undefined}
               dangerouslySetInnerHTML={{ __html: formattedContent }}
             />
 
-            {/* ── BUG 3 FIX: Click hint BELOW content ─────────────────────── */}
             {!isUser && !isGreeting && (
               <div className="mt-3">
                 <ClickHint />

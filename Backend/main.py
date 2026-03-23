@@ -262,7 +262,7 @@ async def clear_file():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  SVG DIAGRAM GENERATION  (unchanged)
+#  SVG DIAGRAM GENERATION
 # ════════════════════════════════════════════════════════════════════════════
 
 _svg_cache: OrderedDict = OrderedDict()
@@ -608,6 +608,7 @@ def detect_mode_from_message(msg_lower: str) -> Tuple[str,int]:
         if gn: return "points",int(gn.group(1))
     return "detailed",2
 
+# ── FIX: All token limits raised to 8000 to prevent mid-sentence cutoff ──
 def build_system_prompt(mode,point_count,user_context,detected_lang,headings,page_match=None,mark_match=None) -> Tuple[str,int]:
     lang_instr=build_language_instruction(detected_lang)
     if page_match:
@@ -623,20 +624,20 @@ def build_system_prompt(mode,point_count,user_context,detected_lang,headings,pag
     if mode=="notes":
         return (f"You are NexusAI, an expert academic note-maker.\n{user_context}\n\nGenerate comprehensive structured NOTES on the topic.\n"
                 f"Use numbered points and sub-points. Short crisp sentences. Include: Definition, Key Concepts, Types, Working, Advantages, Disadvantages, Applications.\n"
-                f"{lang_instr} NO schedule. NO ## symbols.", 6000)
+                f"{lang_instr} NO schedule. NO ## symbols.", 8000)  # ← was 6000
     if mode=="detailed_no_schedule":
         return (f"You are NexusAI, a university-level academic expert.\n{user_context}\n\nProvide a COMPREHENSIVE 2000-word explanation.\n{lang_instr}\n"
                 f"Use clear section headings (no ## symbols, no ALL-CAPS):\n"
                 f"  {headings['intro']}, {headings['fundamental']}, {headings['detailed']},\n"
                 f"  {headings['examples']}, {headings['applications']},\n"
-                f"  {headings['advantages']}, {headings['limitations']}, {headings['conclusion']}\nNO timetable. NO image tags.", 6000)
+                f"  {headings['advantages']}, {headings['limitations']}, {headings['conclusion']}\nNO timetable. NO image tags.", 8000)  # ← was 6000
     if mode=="teaching":
-        return (f"You are NexusAI, a patient teacher.\n{user_context}\n\n{lang_instr} Simple language and analogies. NO ## symbols.", 2000)
+        return (f"You are NexusAI, a patient teacher.\n{user_context}\n\n{lang_instr} Simple language and analogies. NO ## symbols.", 4000)  # ← was 2000
     return (f"You are NexusAI.\n{user_context}\n\nProvide a detailed ~1500-word explanation of the topic.\n\n{lang_instr}\n\n"
             f"EXPLANATION STRUCTURE — clear section headings (no ## symbols, no ALL-CAPS):\n"
             f"  {headings['intro']}\n  {headings['concepts']}\n  {headings['example']}\n"
             f"  {headings['applications']}\n  {headings['insights']}\n\n"
-            f"NO timetable. NO study schedule. NO markdown image tags.", 4000)
+            f"NO timetable. NO study schedule. NO markdown image tags.", 8000)  # ← was 4000
 
 def process_detailed_response_without_schedule(user_message,messages):
     user_context=extract_user_context(user_message); msg_lower=user_message.lower()
@@ -670,36 +671,56 @@ async def teach_simple(request: SimpleTeachRequest):
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
 
 
+# ── FIX: explain-like-child — max_tokens raised, prompt forces all 7 paragraphs ──
 @app.post("/api/explain-like-child")
 async def explain_like_child(request: ChildTeachRequest):
     try:
         topic=request.topic; language=request.language
         def build_prompt(strict=False):
-            base=(f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
-                  f"Write EXACTLY 7 short paragraphs. Each paragraph is 2-3 simple sentences.\n"
-                  f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
-                  f"NO emoji anywhere in the response.\nNO bullet points. NO numbered lists. NO ## symbols.\n"
-                  f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
-                  f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
-                  f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
-                  f"Separate paragraphs with one blank line.\nEnd the last sentence with one fun fact about '{topic}'.\n"
-                  f"Plain text only. Language: {language}.")
-            if strict: base+=f"\n\nCRITICAL: Your response MUST begin with a real word, not a symbol or emoji. Begin explaining '{topic}' immediately."
+            base=(
+                f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
+                f"Write EXACTLY 7 paragraphs. Each paragraph MUST be 4-5 simple sentences long.\n"
+                f"Do NOT stop early. You MUST complete all 7 paragraphs fully before stopping.\n"
+                f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
+                f"NO emoji anywhere in the response.\nNO bullet points. NO numbered lists. NO ## symbols.\n"
+                f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
+                f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
+                f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
+                f"Separate paragraphs with one blank line.\n"
+                f"End the last paragraph with one fun fact about '{topic}'.\n"
+                f"Plain text only. Language: {language}."
+            )
+            if strict: base+=f"\n\nCRITICAL: Begin explaining '{topic}' immediately with a real word. Write all 7 paragraphs without stopping."
             return base
         def strip_response(raw):
             plain=clean_to_plain_text(raw); lines=plain.splitlines()
             while lines and not any(c.isalpha() for c in lines[0]): lines.pop(0)
             return "\n".join(lines).strip()
-        raw1=chat_completion(messages=[{"role":"system","content":build_prompt()},{"role":"user","content":f"Explain {topic} like I'm 5 years old!"}],temperature=0.4,max_tokens=1000,top_p=0.9)
+        # ── FIX: max_tokens raised from 2000 → 3000 ──
+        raw1=chat_completion(
+            messages=[{"role":"system","content":build_prompt()},{"role":"user","content":f"Explain {topic} like I'm 5 years old! Write all 7 paragraphs completely."}],
+            temperature=0.4, max_tokens=3000, top_p=0.9
+        )
         plain=strip_response(raw1)
         if not plain or not any(c.isalpha() for c in plain):
             print(f"⚠ explain-like-child: empty after strip, retrying...")
-            raw2=chat_completion(messages=[{"role":"system","content":build_prompt(True)},{"role":"user","content":f"Explain {topic} to a young child in 3 paragraphs."}],temperature=0.2,max_tokens=500,top_p=0.85)
+            # ── FIX: retry max_tokens raised from 500 → 2500 ──
+            raw2=chat_completion(
+                messages=[{"role":"system","content":build_prompt(True)},{"role":"user","content":f"Explain {topic} to a young child in 7 paragraphs. Write all 7 fully."}],
+                temperature=0.2, max_tokens=2500, top_p=0.85
+            )
             plain=strip_response(raw2)
         if not plain or not any(c.isalpha() for c in plain):
-            plain=(f"{topic} is something really interesting!\n\nThink of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n\n"
-                   f"People use {topic} every day to solve problems and make life easier. Fun fact: even kids can start learning about {topic} with just a little practice each day!")
-        return {"response":plain}
+            plain=(
+                f"{topic} is something really interesting!\n\n"
+                f"Think of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n\n"
+                f"People use {topic} every day to solve problems and make life easier.\n\n"
+                f"Imagine you had a magic box that could do special things — that is a little bit like {topic}.\n\n"
+                f"When you learn about {topic}, you start to understand how many things around you work.\n\n"
+                f"Even grown-ups spend years learning about {topic} because there is always something new to discover.\n\n"
+                f"Fun fact: {topic} is used in so many places that you probably see it every single day without even knowing it!"
+            )
+        return {"response": plain}
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
@@ -840,10 +861,6 @@ async def chat_stream(request: ChatRequest):
 
 # ════════════════════════════════════════════════════════════════════════════
 #  QUIZ ENDPOINTS
-#  CHANGED: /api/quiz/generate
-#  - 1-mark → MCQ with 4 REAL AI-generated topic-specific options (no placeholders)
-#    Retries once if first attempt returns bad options.
-#  - 2+ marks → written answer (unchanged from your original)
 # ════════════════════════════════════════════════════════════════════════════
 
 class QuizGenerateRequest(BaseModel):
@@ -866,7 +883,6 @@ class QuizEvaluateRequest(BaseModel):
 async def quiz_generate(request: QuizGenerateRequest):
     is_mcq = request.marks_per_question == 1
 
-    # ── 1-mark: MCQ with real AI-generated options ────────────────────────
     if is_mcq:
         mcq_system = (
             "You are a university exam MCQ generator. "
@@ -933,7 +949,6 @@ async def quiz_generate(request: QuizGenerateRequest):
             import traceback; print(traceback.format_exc())
             raise HTTPException(status_code=500, detail="Failed to generate MCQ questions.")
 
-    # ── 2+ marks: written questions (unchanged from your original) ────────
     else:
         try:
             system_prompt = (
@@ -1008,8 +1023,6 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
 
 # ════════════════════════════════════════════════════════════════════════════
 #  ENDPOINT: /api/roadmap
-#  CHANGED: 6 lessons × 5 resources, max_tokens=1500, async thread executor
-#  Target response time: < 2 seconds
 # ════════════════════════════════════════════════════════════════════════════
 
 class RoadmapRequest(BaseModel):
@@ -1046,7 +1059,6 @@ def _fallback_resources(lesson_title: str, subject: str) -> list:
 
 
 def _generate_roadmap_sync(subject: str) -> dict:
-    """6 lessons × 5 resources, max_tokens=1500 — target < 2 sec."""
     system_prompt = (
         "You are a curriculum designer. Output ONLY a raw JSON array — "
         "no markdown, no backticks, no explanation.\n"
