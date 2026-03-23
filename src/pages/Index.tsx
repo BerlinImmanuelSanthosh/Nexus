@@ -36,8 +36,6 @@ const Index = () => {
     setActiveConversationId,
     createNewConversation,
     sendMessage,
-    uploadFile,
-    clearFile,
     deleteConversation,
   } = useChat();
 
