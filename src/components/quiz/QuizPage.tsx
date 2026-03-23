@@ -274,6 +274,17 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Motivation message - bottom left */}
+      <div
+        className={cn(
+          "fixed bottom-6 left-6 z-50 flex items-center gap-2 px-4 py-3 rounded-xl border border-primary/30 bg-background/95 shadow-lg backdrop-blur-sm transition-all duration-500",
+          showMotivation ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
+        )}
+      >
+        <Sparkles className="h-4 w-4 text-primary shrink-0" />
+        <span className="text-sm font-medium text-foreground">{motivationMsg}</span>
+      </div>
     </div>
   );
 };
