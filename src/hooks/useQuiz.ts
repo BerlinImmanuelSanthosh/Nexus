@@ -358,7 +358,21 @@ export function useQuiz() {
       const data: QuizResultData = await res.json();
       setResult(data);
     } catch {
-      setError('Failed to evaluate answers.');
+      // Backend unreachable — show a fallback result so the UI still renders
+      const totalPossible = answers.reduce((s, a) => s + a.max_marks, 0);
+      const fallbackResult: QuizResultData = {
+        total_possible: totalPossible,
+        total_awarded: 0,
+        evaluations: answers.map(a => ({
+          question_id: a.question_id,
+          question: a.question,
+          max_marks: a.max_marks,
+          awarded_marks: 0,
+          feedback: 'Could not evaluate — backend is not reachable. Please ensure your backend server is running on localhost:8000.',
+        })),
+      };
+      setResult(fallbackResult);
+      setError('Failed to evaluate answers. Backend not reachable.');
     } finally {
       setLoading(false);
     }
