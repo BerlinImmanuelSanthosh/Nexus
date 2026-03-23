@@ -24,16 +24,45 @@ interface QuizPageProps {
   onSubmit: () => void;
 }
 
+const MOTIVATION_MESSAGES = [
+  "You're doing great! Keep going! 💪",
+  "Stay focused, you've got this! 🎯",
+  "Believe in yourself! ✨",
+  "Every question counts — give it your best! 🔥",
+  "Almost there, keep pushing! 🚀",
+  "Great minds think through tough questions! 🧠",
+  "You're stronger than you think! 💎",
+  "Stay calm and confident! 😊",
+  "One step at a time — you'll ace this! 🌟",
+  "Hard work pays off — keep it up! 🏆",
+];
+
 const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: QuizPageProps) => {
   const totalSeconds = config.timeHours * 3600 + config.timeMinutes * 60;
   const [expandedQuestion, setExpandedQuestion] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [motivationMsg, setMotivationMsg] = useState('');
+  const [showMotivation, setShowMotivation] = useState(false);
 
   // One ref per written question to export canvas+text
   const editorRefs = useRef<Record<string, AnswerEditorRef | null>>({});
 
   // Destructure result and reset as well
   const { submitAnswers, result, reset, loading: submitLoading } = useQuiz();
+
+  // Motivation messages every 10 seconds
+  useEffect(() => {
+    let msgIndex = 0;
+    const show = () => {
+      setMotivationMsg(MOTIVATION_MESSAGES[msgIndex % MOTIVATION_MESSAGES.length]);
+      setShowMotivation(true);
+      msgIndex++;
+      setTimeout(() => setShowMotivation(false), 4000);
+    };
+    show(); // show first immediately
+    const interval = setInterval(show, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleTimeUp = useCallback(() => {
     // Flush all editor data before submitting
