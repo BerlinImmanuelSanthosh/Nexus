@@ -4,7 +4,7 @@ import QuizTimer from './QuizTimer';
 import AnswerEditor, { AnswerEditorRef } from './AnswerEditor';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronUp, AlertTriangle, Sparkles } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
