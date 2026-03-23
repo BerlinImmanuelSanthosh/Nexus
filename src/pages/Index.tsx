@@ -60,28 +60,15 @@ const Index = () => {
   const handleIntroComplete = useCallback(() => setShowIntro(false), []);
   const handleToggleSidebar = useCallback(() => setSidebarOpen(prev => !prev), []);
 
-  // ── File upload handler — sends file to backend ─────────────────────────
-  const handleFileUpload = useCallback(async (file: File) => {
-    const toastId = toast.loading(`Uploading ${file.name}...`);
-    try {
-      const success = await uploadFile(file);
-      toast.dismiss(toastId);
-      if (success) {
-        toast.success(`✅ ${file.name} ready — ask questions about it!`);
-      } else {
-        toast.error(`❌ Failed to upload ${file.name}. Try again.`);
-      }
-    } catch (err) {
-      toast.dismiss(toastId);
-      toast.error(`❌ Upload failed. Is the backend running?`);
-    }
-  }, [uploadFile]);
+  // ── File upload handler ─────────────────────────
+  const handleFileUpload = useCallback(async (_file: File) => {
+    toast.info('File upload coming soon!');
+  }, []);
 
-  // ── Clear file handler ──────────────────────────────────────────────────
+  // ── Clear file handler ──────────────────────────
   const handleClearFile = useCallback(async () => {
-    await clearFile();
-    toast.success('File removed from memory');
-  }, [clearFile]);
+    toast.info('File cleared');
+  }, []);
 
   const handleStartQuiz = useCallback(async (config: QuizConfig) => {
     await startQuiz(config, chatQuestion ?? undefined);
