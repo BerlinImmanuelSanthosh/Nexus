@@ -366,6 +366,7 @@ export function useQuiz() {
         evaluations: answers.map(a => ({
           question_id: a.question_id,
           question: a.question,
+          student_answer: a.student_answer,
           max_marks: a.max_marks,
           awarded_marks: 0,
           feedback: 'Could not evaluate — backend is not reachable. Please ensure your backend server is running on localhost:8000.',
