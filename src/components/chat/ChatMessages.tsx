@@ -1,5 +1,5 @@
 import { useRef, useEffect, memo, useState, useCallback } from 'react';
-import { Message } from '@/types/chat';
+import { Message, UploadedFile } from '@/types/chat';
 import MessageBubble from './MessageBubble';
 import MessageExpandModal from './MessageExpandModal';
 import { Sparkles } from 'lucide-react';
@@ -7,11 +7,13 @@ import { Sparkles } from 'lucide-react';
 interface ChatMessagesProps {
   messages: Message[];
   isTyping: boolean;
+  uploadedFile?: UploadedFile;
+  onClearFile?: () => void;
   onTakeTest?: (question: string) => void;
   onRoadmap?: (subject: string) => void;
 }
 
-const ChatMessages = memo(({ messages, isTyping, onTakeTest, onRoadmap }: ChatMessagesProps) => {
+const ChatMessages = memo(({ messages, isTyping, uploadedFile, onClearFile, onTakeTest, onRoadmap }: ChatMessagesProps) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [expandedMessage, setExpandedMessage] = useState<Message | null>(null);
   const [simplifiedContent, setSimplifiedContent] = useState<string>('');
@@ -87,6 +89,11 @@ const ChatMessages = memo(({ messages, isTyping, onTakeTest, onRoadmap }: ChatMe
       )}
 
       <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 py-6 scrollbar-thin">
+        {/* Uploaded file status indicator - temporarily disabled */}
+        {/* {uploadedFile && uploadedFile.filename && (
+          ... file status code ...
+        )} */}
+
         {messages.map((message, index) => (
           <MessageBubble
             key={message.id}

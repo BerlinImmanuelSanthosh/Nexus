@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { Message, Conversation } from '@/types/chat';
+import { Message, Conversation, UploadedFile } from '@/types/chat';
 
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
@@ -7,6 +7,7 @@ export function useChat() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isTyping, setIsTyping] = useState(false);
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
 
   const activeConversation = conversations.find(c => c.id === activeConversationId);
   const messages = activeConversation?.messages || [];
@@ -27,6 +28,138 @@ export function useChat() {
     setConversations(prev => prev.filter(c => c.id !== id));
     if (activeConversationId === id) {
       setActiveConversationId(null);
+    }
+  }, [activeConversationId]);
+
+  // ── File Upload Handler ────────────────────────────────────────────────
+  const uploadFile = useCallback(async (file: File, conversationId?: string) => {
+    let targetConversationId = conversationId || activeConversationId;
+
+    if (!targetConversationId) {
+      const newConversation: Conversation = {
+        id: generateId(),
+        title: `Chat with ${file.name}`,
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      setConversations(prev => [newConversation, ...prev]);
+      setActiveConversationId(newConversation.id);
+      targetConversationId = newConversation.id;
+    }
+
+    setIsUploadingFile(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch('http://localhost:8000/api/upload-file', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      if (data.success) {
+        const uploadedFile: UploadedFile = {
+          filename: data.filename,
+          file_type: data.file_type,
+          chars_extracted: data.chars_extracted || 0,
+          processing: data.processing || false,
+          ready: !data.processing,
+          preview: data.preview,
+        };
+
+        setConversations(prev => prev.map(c =>
+          c.id === targetConversationId
+            ? { ...c, uploadedFile, updatedAt: new Date() }
+            : c
+        ));
+
+        console.log(`✅ File uploaded: ${file.name}`);
+        return uploadedFile;
+      } else {
+        throw new Error(data.message || 'Upload failed');
+      }
+    } catch (error) {
+      console.error('File upload error:', error);
+      const uploadedFile: UploadedFile = {
+        filename: file.name,
+        file_type: 'pdf',
+        chars_extracted: 0,
+        processing: false,
+        ready: false,
+        error: String(error),
+      };
+      setConversations(prev => prev.map(c =>
+        c.id === targetConversationId
+          ? { ...c, uploadedFile, updatedAt: new Date() }
+          : c
+      ));
+      throw error;
+    } finally {
+      setIsUploadingFile(false);
+    }
+  }, [activeConversationId]);
+
+  // ── Check Upload Status ────────────────────────────────────────────────
+  const checkUploadStatus = useCallback(async (conversationId?: string) => {
+    const targetConversationId = conversationId || activeConversationId;
+    if (!targetConversationId) return null;
+
+    try {
+      const response = await fetch('http://localhost:8000/api/upload-status');
+      if (!response.ok) throw new Error('Failed to check status');
+
+      const data = await response.json();
+      const uploadedFile: UploadedFile = {
+        filename: data.filename || '',
+        file_type: data.file_type || 'pdf',
+        chars_extracted: data.chars_extracted || 0,
+        processing: data.processing || false,
+        ready: data.ready || false,
+        error: data.error,
+      };
+
+      setConversations(prev => prev.map(c =>
+        c.id === targetConversationId
+          ? { ...c, uploadedFile, updatedAt: new Date() }
+          : c
+      ));
+
+      return uploadedFile;
+    } catch (error) {
+      console.error('Status check error:', error);
+      return null;
+    }
+  }, [activeConversationId]);
+
+  // ── Clear Uploaded File ────────────────────────────────────────────────
+  const clearFile = useCallback(async (conversationId?: string) => {
+    const targetConversationId = conversationId || activeConversationId;
+    if (!targetConversationId) return;
+
+    try {
+      const response = await fetch('http://localhost:8000/api/clear-file', {
+        method: 'POST',
+      });
+
+      if (!response.ok) throw new Error('Failed to clear file');
+
+      setConversations(prev => prev.map(c =>
+        c.id === targetConversationId
+          ? { ...c, uploadedFile: undefined, updatedAt: new Date() }
+          : c
+      ));
+
+      console.log('✅ File cleared');
+    } catch (error) {
+      console.error('Clear file error:', error);
     }
   }, [activeConversationId]);
 
@@ -316,10 +449,14 @@ export function useChat() {
     activeConversationId,
     messages,
     isTyping,
+    isUploadingFile,
     setActiveConversationId,
     createNewConversation,
     sendMessage,
     explainLikeChild,
     deleteConversation,
+    uploadFile,
+    checkUploadStatus,
+    clearFile,
   };
 }

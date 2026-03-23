@@ -33,11 +33,18 @@ const Index = () => {
     activeConversationId,
     messages,
     isTyping,
+    isUploadingFile,
     setActiveConversationId,
     createNewConversation,
     sendMessage,
     deleteConversation,
+    uploadFile,
+    checkUploadStatus,
+    clearFile,
   } = useChat();
+
+  // Compute activeConversation from conversations and activeConversationId
+  const activeConversation = conversations.find(c => c.id === activeConversationId);
 
   const {
     quizResults,
@@ -61,14 +68,39 @@ const Index = () => {
   const handleToggleSidebar = useCallback(() => setSidebarOpen(prev => !prev), []);
 
   // ── File upload handler ─────────────────────────
-  const handleFileUpload = useCallback(async (_file: File) => {
-    toast.info('File upload coming soon!');
-  }, []);
+  const handleFileUpload = useCallback(async (file: File) => {
+    try {
+      await uploadFile(file);
+      toast.success(`📄 ${file.name} uploaded successfully`);
+    } catch (error) {
+      toast.error(`Failed to upload ${file.name}`);
+      console.error(error);
+    }
+  }, [uploadFile]);
+
+  // ── Check file upload status ─────────────────────
+  const handleCheckUploadStatus = useCallback(async () => {
+    const status = await checkUploadStatus();
+    if (status) {
+      if (status.processing) {
+        toast.info(`⏳ Still processing ${status.filename}...`);
+      } else if (status.ready) {
+        toast.success(`✅ ${status.filename} ready! (${status.chars_extracted} chars)`);
+      } else if (status.error) {
+        toast.error(`Error: ${status.error}`);
+      }
+    }
+  }, [checkUploadStatus]);
 
   // ── Clear file handler ──────────────────────────
   const handleClearFile = useCallback(async () => {
-    toast.info('File cleared');
-  }, []);
+    try {
+      await clearFile();
+      toast.success('File cleared');
+    } catch (error) {
+      toast.error('Failed to clear file');
+    }
+  }, [clearFile]);
 
   const handleStartQuiz = useCallback(async (config: QuizConfig) => {
     await startQuiz(config, chatQuestion ?? undefined);
@@ -215,6 +247,8 @@ const Index = () => {
             <ChatMessages
               messages={messages}
               isTyping={isTyping}
+              uploadedFile={activeConversation?.uploadedFile}
+              onClearFile={handleClearFile}
               onTakeTest={handleTakeTestFromChat}
               onRoadmap={handleRoadmapFromChat}
             />

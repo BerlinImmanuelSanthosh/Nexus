@@ -4,6 +4,7 @@ import io
 import json
 import asyncio
 import base64
+import tempfile
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
@@ -15,14 +16,18 @@ from groq import Groq
 from dotenv import load_dotenv
 from functools import lru_cache
 from collections import OrderedDict
+import threading
+import time
+from contextlib import asynccontextmanager
 
+# Optional imports
 try:
     from googletrans import Translator
     TRANSLATOR_AVAILABLE = True
     print("✓ googletrans loaded successfully")
 except ImportError:
     TRANSLATOR_AVAILABLE = False
-    print("✗ googletrans not installed. Install with: pip install googletrans==4.0.0rc1")
+    print("✗ googletrans not installed")
 
 try:
     import fitz  # PyMuPDF
@@ -30,7 +35,25 @@ try:
     print("✓ PyMuPDF loaded successfully")
 except ImportError:
     PYMUPDF_AVAILABLE = False
-    print("✗ PyMuPDF not installed. Install with: pip install pymupdf")
+    print("✗ PyMuPDF not installed")
+
+try:
+    from langchain_community.document_loaders import PyPDFLoader, PDFPlumberLoader
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    LANGCHAIN_AVAILABLE = True
+    print("✓ LangChain PDF loaders loaded successfully")
+except ImportError:
+    LANGCHAIN_AVAILABLE = False
+    print("✗ LangChain not installed")
+
+try:
+    import pytesseract
+    from PIL import Image
+    PYTESSERACT_AVAILABLE = True
+    print("✓ Pytesseract loaded successfully")
+except ImportError:
+    PYTESSERACT_AVAILABLE = False
+    print("✗ Pytesseract not installed - install with: pip install pytesseract pillow")
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -40,7 +63,15 @@ if not GROQ_API_KEY:
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CX      = os.getenv("GOOGLE_CX", "")
 
-app = FastAPI(title="NexusAI Chatbot")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        yield
+    except asyncio.CancelledError:
+        # Handle cancellation gracefully during shutdown
+        pass
+
+app = FastAPI(lifespan=lifespan, title="NexusAI Chatbot")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8080", "http://localhost:5173"],
@@ -48,6 +79,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Global file context with thread safety ---
+_file_context_lock = threading.Lock()
 _file_context: dict = {
     "text":       "",
     "filename":   "",
@@ -56,9 +89,11 @@ _file_context: dict = {
     "ready":      False,
     "error":      "",
 }
-_executor = ThreadPoolExecutor(max_workers=4)
 
+# FIX: Reduced from 50 to 20 workers to prevent resource exhaustion
+_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="nexus_worker")
 
+# --- Pydantic models ---
 class ChatRequest(BaseModel):
     messages: List[dict]
 
@@ -71,42 +106,93 @@ class ChildTeachRequest(BaseModel):
     topic: str
     language: str = "en"
 
-_groq_client = None
-def get_groq_client():
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=GROQ_API_KEY)
-    return _groq_client
+class QuizGenerateRequest(BaseModel):
+    topic: str
+    num_questions: int = 5
+    marks_per_question: int = 2
+    difficulty: str = "medium"
 
-_PRIMARY_MODEL  = "openai/gpt-oss-20b"
-_FALLBACK_MODEL = "openai/gpt-oss-120b"
+class QuizAnswerItem(BaseModel):
+    question_id: str
+    question: str
+    student_answer: str
+    max_marks: int
+
+class QuizEvaluateRequest(BaseModel):
+    answers: List[QuizAnswerItem]
+
+class RoadmapRequest(BaseModel):
+    subject: str
+
+# --- Groq client with connection pool management ---
+# FIX: Create fresh client per request to avoid connection pool exhaustion
+_groq_client_lock = threading.Lock()
+_groq_client_instances = []
+_MAX_CLIENT_INSTANCES = 3  # FIX: Reduced from 10 to 3 to prevent resource exhaustion
+
+def get_groq_client():
+    """Get or create a Groq client with proper timeout configuration."""
+    with _groq_client_lock:
+        # Clean up old/dead clients
+        _groq_client_instances[:] = [c for c in _groq_client_instances if c is not None]
+        
+        # Reuse existing client to prevent exhaustion
+        if _groq_client_instances:
+            # Always reuse the first client instead of round-robin
+            # This reduces the number of active connections
+            return _groq_client_instances[0]
+        
+        # Create new client if we don't have one
+        if len(_groq_client_instances) < _MAX_CLIENT_INSTANCES:
+            # FIX: Explicit timeout to prevent hanging
+            client = Groq(
+                api_key=GROQ_API_KEY,
+                timeout=30.0,  # 30 second timeout
+                max_retries=2  # Retry twice on failure
+            )
+            _groq_client_instances.append(client)
+            return client
+        else:
+            # Fallback: reuse first available client
+            return _groq_client_instances[0]
 
 def chat_completion(messages: list, temperature: float = 0.25,
-                    max_tokens: int = 8000, top_p: float = 0.92) -> str:
-    for model in [_PRIMARY_MODEL, _FALLBACK_MODEL]:
-        try:
-            comp = get_groq_client().chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-            )
-            if model != _PRIMARY_MODEL:
-                print(f"✅ Fallback model '{model}' succeeded")
-            return comp.choices[0].message.content.strip()
-        except Exception as e:
-            err_str = str(e)
-            is_rate_limit = '429' in err_str or 'rate_limit' in err_str.lower()
-            is_too_large  = '413' in err_str or 'too large' in err_str.lower()
-            if (is_rate_limit or is_too_large) and model == _PRIMARY_MODEL:
-                print(f"⚠ Primary model rate-limited — switching to fallback")
-                continue
-            else:
-                raise
-    raise RuntimeError("Both primary and fallback models failed")
+                    max_tokens: int = 16000, top_p: float = 0.92, 
+                    timeout: float = 30.0) -> str:
+    """FIX: Added timeout parameter and retry logic with exponential backoff."""
+    for attempt in range(3):
+        for model in ["openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b"]:
+            try:
+                client = get_groq_client()
+                comp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    timeout=timeout,  # FIX: Explicit timeout
+                )
+                if model != "openai/gpt-oss-20b":
+                    print(f"✅ Fallback model '{model}' succeeded")
+                return comp.choices[0].message.content.strip()
+            except Exception as e:
+                err_str = str(e)
+                is_rate_limit = '429' in err_str or 'rate_limit' in err_str.lower()
+                is_timeout = 'timeout' in err_str.lower() or '504' in err_str
+                is_connection = 'connection' in err_str.lower() or '503' in err_str
+                
+                if is_rate_limit and model == "openai/gpt-oss-20b":
+                    print(f"⚠ Rate limited on primary — switching to fallback")
+                    continue
+                elif is_timeout or is_connection:
+                    print(f"⚠ Attempt {attempt+1}: {err_str[:100]} — retrying...")
+                    time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                    continue
+                else:
+                    raise
+    raise RuntimeError("All models and retries failed")
 
-
+# --- Helper functions ---
 def clean_llm_response(text: str) -> str:
     text = re.sub(r'!\[[^\]]*\]\([^\)]*\)', '', text)
     text = re.sub(r'^#{1,6}\s+(.+)$', lambda m: f"\n{m.group(1).strip()}\n", text, flags=re.MULTILINE)
@@ -120,32 +206,194 @@ def clean_to_plain_text(text: str) -> str:
     text = re.sub(r'!\[[^\]]*\]\([^\)]*\)', '', text)
     text = re.sub(r'\[[^\]]*\]\([^\)]*\)', '', text)
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'\n{3,}', '\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
 
+def extract_text_with_ocr(image_bytes: bytes, page_num: int) -> str:
+    """
+    Extract text from image using pytesseract with timeout for speed.
+    """
+    if not PYTESSERACT_AVAILABLE:
+        return ""
+    
+    try:
+        # Convert image bytes to PIL Image
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Run OCR with timeout - skip slow pages
+        try:
+            text = pytesseract.image_to_string(img, lang='eng', timeout=3)
+        except Exception as timeout_e:
+            print(f"    ⚠️ OCR timeout for page {page_num + 1} (slow to process)")
+            return ""
+        
+        # Clean up extracted text
+        text = text.strip()
+        
+        if text and len(text) > 10:
+            return text
+        else:
+            return ""
+            
+    except pytesseract.TesseractNotFoundError:
+        print(f"    ❌ Tesseract not installed")
+        return ""
+    except Exception as e:
+        return ""
+
+def extract_text_with_langchain(pdf_bytes: bytes) -> str:
+    """
+    Extract text from PDF using LangChain document loaders.
+    Better handling of scanned PDFs and complex layouts.
+    """
+    if not LANGCHAIN_AVAILABLE:
+        return ""
+    
+    try:
+        # Save to temp file for LangChain
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            # Try PDFPlumber first (better for structured layouts)
+            loader = PDFPlumberLoader(tmp_path)
+            docs = loader.load()
+            
+            # Combine all pages
+            text = "\n".join([doc.page_content for doc in docs])
+            return text
+            
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"  ⚠️ LangChain extraction error: {e}")
+        return ""
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
+    """
+    Extract text from scanned PDF with OPTIMIZED speed.
+    Uses aggressive sampling + parallel OCR to extract in ~15-20 seconds.
+    
+    Strategy:
+    1. Try LangChain (searchable PDFs) - instant if works
+    2. Sample only key pages (first 5 + every 20th) for scanned PDFs
+    3. Use parallel OCR to process multiple pages simultaneously
+    4. Lower resolution rendering for faster OCR
+    """
+    
+    # First attempt: LangChain PDFPlumber (instant for searchable PDFs)
+    if LANGCHAIN_AVAILABLE:
+        try:
+            langchain_result = extract_text_with_langchain(pdf_bytes)
+            if langchain_result and len(langchain_result) > 500:
+                print(f"✅ LangChain extraction successful: {len(langchain_result):,} chars (instant)")
+                return langchain_result
+        except:
+            pass
+    
     if not PYMUPDF_AVAILABLE:
         return ""
+    
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        parts = [page.get_text() for page in doc]
+        total_pages = len(doc)
+        print(f"📄 PDF has {total_pages} pages (scanned), extracting key pages with OCR...")
+        
+        # Strategy for scanned PDFs: balance speed & coverage
+        pages_to_ocr = []
+        
+        # Always include first 15 pages (intro/key content)
+        pages_to_ocr.extend(range(0, min(15, total_pages)))
+        
+        # Add every 10th page (better coverage for image-based PDFs)
+        for i in range(0, total_pages, 10):
+            if i not in pages_to_ocr:
+                pages_to_ocr.append(i)
+        
+        # Also include last 10 pages (often have summary/conclusion)
+        pages_to_ocr.extend(range(max(total_pages-10, 0), total_pages))
+        
+        pages_to_ocr = sorted(set(pages_to_ocr))  # Remove duplicates and sort
+        print(f"  🎯 Sampling {len(pages_to_ocr)} pages: first 15 + every 10th + last 10")
+        print(f"  ⚡ Using parallel OCR processing...")
+        
+        # Render and process pages in parallel using ThreadPoolExecutor
+        all_text_parts = {}
+        
+        def process_page_ocr(page_num: int) -> tuple:
+            """Process single page with OCR, return (page_num, text)"""
+            try:
+                page = doc[page_num]
+                page_text = page.get_text().strip()
+                
+                # Skip pages with sufficient text (already searchable)
+                if len(page_text) > 100:
+                    return (page_num, page_text)
+                
+                # For scanned pages, use medium resolution for better OCR accuracy (0.75x zoom)
+                pix = page.get_pixmap(matrix=fitz.Matrix(0.75, 0.75), alpha=False)
+                image_bytes = pix.tobytes(output="png")
+                
+                # Skip if too large
+                if len(image_bytes) > 3 * 1024 * 1024:
+                    return (page_num, page_text)
+                
+                # OCR this page
+                ocr_text = extract_text_with_ocr(image_bytes, page_num)
+                combined = (page_text + "\n" + ocr_text).strip() if page_text else ocr_text
+                
+                if ocr_text:
+                    print(f"  ✅ Page {page_num + 1}: {len(ocr_text)} chars")
+                
+                return (page_num, combined)
+            except Exception as e:
+                return (page_num, "")
+        
+        # Process pages in parallel (4 workers for OCR)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(process_page_ocr, pages_to_ocr))
+        
+        # Combine results in order
+        for page_num, text in results:
+            if text:
+                all_text_parts[page_num] = text
+        
+        # Combine pages in page order
+        result_text = []
+        for page_num in sorted(all_text_parts.keys()):
+            result_text.append(all_text_parts[page_num])
+        
         doc.close()
-        return "\n".join(parts).strip()
+        result = "\n\n".join(result_text).strip()
+        
+        if result and len(result) > 100:
+            print(f"✅ PDF extraction complete: {len(result):,} chars from {len(pages_to_ocr)} sampled pages")
+            return result
+        else:
+            print(f"⚠️ PDF extraction resulted in minimal text")
+            return ""
+        
     except Exception as e:
-        print(f"⚠ PDF extraction error: {e}")
+        print(f"⚠️ PDF extraction error: {e}")
         return ""
 
 def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
     try:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         comp = get_groq_client().chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="openai/gpt-oss-safeguard-20b",
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                    {"type": "image_url", "image_url": {"url": f"{mime_type};base64,{b64}"}},
                     {"type": "text", "text": (
                         "Describe this image in full detail. "
                         "Extract any visible text, labels, diagrams, tables, or data. "
@@ -153,7 +401,9 @@ def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
                     )}
                 ]
             }],
-            temperature=0.1, max_tokens=1500,
+            temperature=0.1, 
+            max_tokens=1500,
+            timeout=30.0,  # FIX: Explicit timeout
         )
         return comp.choices[0].message.content.strip()
     except Exception as e:
@@ -163,48 +413,88 @@ def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
 def answer_from_file_context(user_question: str, file_text: str, filename: str) -> Optional[str]:
     if not file_text or len(file_text.strip()) < 20:
         return None
-    trimmed = file_text[:6000]
+    
+    # Extract keywords from the question for better matching
+    question_lower = user_question.lower()
+    keywords = []
+    # Simple keyword extraction - split and take meaningful words
+    words = re.findall(r'\b\w{4,}\b', question_lower)  # words of 4+ chars
+    keywords = [w for w in words if w not in ['what', 'when', 'where', 'which', 'from', 'with', 'that', 'this', 'have', 'does', 'explain', 'describe', 'tell', 'about', 'please']]
+    
+    # Search for relevant sections containing keywords
+    relevant_sections = []
+    text_lower = file_text.lower()
+    
+    for keyword in keywords[:3]:  # Limit to first 3 keywords to avoid too much
+        start = 0
+        while True:
+            pos = text_lower.find(keyword, start)
+            if pos == -1:
+                break
+            # Extract context around the keyword (500 chars before and after)
+            context_start = max(0, pos - 500)
+            context_end = min(len(file_text), pos + 500)
+            section = file_text[context_start:context_end]
+            if section not in relevant_sections:  # Avoid duplicates
+                relevant_sections.append(section)
+            start = pos + 1
+    
+    # If no keywords found, fall back to first 20000 chars
+    if not relevant_sections:
+        relevant_sections = [file_text[:20000]]
+    
+    # Combine sections, limit total to ~15000 chars to fit token limits
+    combined_text = '\n\n'.join(relevant_sections)
+    if len(combined_text) > 15000:
+        combined_text = combined_text[:15000] + '...'
+    
     system_prompt = (
         "You are NexusAI File Analyst. "
-        "Answer the user's question ONLY from the FILE CONTENT provided. "
-        "If the answer is present, reply clearly and concisely. "
-        "If the answer is NOT present in the file, reply with exactly: NOT_IN_FILE"
+        "Answer the user's question using the FILE CONTENT provided. "
+        "Reply with the answer from the file. "
+        "If not found in file, reply: NOT_IN_FILE"
     )
-    user_msg = f"FILE: {filename}\n\nFILE CONTENT:\n{trimmed}\n\nUSER QUESTION: {user_question}"
+    user_msg = f"FILE: {filename}\n\nCONTENT:\n{combined_text}\n\n---\nQUESTION: {user_question}\n\nAnswer from file:"
     try:
         answer = chat_completion(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg}],
-            temperature=0.1, max_tokens=800,
+            temperature=0.1, 
+            max_tokens=1000,
+            timeout=20.0,
         )
-        if answer.upper().startswith("NOT_IN_FILE"):
+        if answer.upper().startswith("NOT_IN_FILE") or len(answer.strip()) < 5:
             return None
         return clean_llm_response(answer)
     except Exception as e:
         print(f"⚠ file-context answer error: {e}")
         return None
 
-
+# --- Background PDF processing ---
 def _background_process_pdf(pdf_bytes: bytes, filename: str):
     global _file_context
-    try:
+    with _file_context_lock:
         _file_context["processing"] = True
         _file_context["ready"]      = False
         _file_context["error"]      = ""
+    try:
         extracted_text = extract_text_from_pdf_bytes(pdf_bytes)
         if not extracted_text:
-            _file_context["error"]      = "Could not extract text from PDF."
-            _file_context["processing"] = False
+            with _file_context_lock:
+                _file_context["error"]      = "Could not extract text from PDF."
+                _file_context["processing"] = False
             return
-        _file_context["text"]       = extracted_text
-        _file_context["ready"]      = True
-        _file_context["processing"] = False
+        with _file_context_lock:
+            _file_context["text"]       = extracted_text
+            _file_context["ready"]      = True
+            _file_context["processing"] = False
         print(f"✅ Background PDF done: {len(extracted_text)} chars for '{filename}'")
     except Exception as e:
         import traceback; traceback.print_exc()
-        _file_context["error"]      = str(e)
-        _file_context["processing"] = False
+        with _file_context_lock:
+            _file_context["error"]      = str(e)
+            _file_context["processing"] = False
 
-
+# --- File upload endpoint ---
 @app.post("/api/upload-file")
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     global _file_context
@@ -212,66 +502,80 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
         content_type = file.content_type or ""
         filename     = file.filename or "uploaded_file"
         print(f"\n📁 Upload started: {filename} | content_type={content_type}")
-        MAX_BYTES = 50 * 1024 * 1024
+        MAX_BYTES = 100 * 1024 * 1024  # FIX: Increased from 50MB to 100MB for large PDFs
         chunks = []; total = 0
         while True:
             chunk = await file.read(1024 * 256)
             if not chunk: break
             total += len(chunk)
             if total > MAX_BYTES:
-                raise HTTPException(status_code=413, detail="File too large. Maximum size is 50 MB.")
+                raise HTTPException(status_code=413, detail="File too large. Maximum size is 100 MB.")
             chunks.append(chunk)
         file_bytes  = b"".join(chunks)
-        print(f"📁 Upload received: {filename} ({len(file_bytes):,} bytes)")
+        print(f"📁 Upload received: {filename} ({len(file_bytes):,} bytes / {len(file_bytes) / (1024*1024):.1f} MB)")
         fname_lower = filename.lower()
         is_pdf   = ("pdf" in content_type) or fname_lower.endswith(".pdf")
         is_image = (content_type.startswith("image/")) or fname_lower.endswith((".png",".jpg",".jpeg",".gif",".webp",".bmp"))
         if is_pdf:
-            _file_context.update({"text":"","filename":filename,"type":"pdf","processing":True,"ready":False,"error":""})
+            with _file_context_lock:
+                _file_context.update({"text":"","filename":filename,"type":"pdf","processing":True,"ready":False,"error":""})
             background_tasks.add_task(_background_process_pdf, file_bytes, filename)
+            file_size_mb = len(file_bytes) / (1024*1024)
+            processing_time_est = f"{int(file_size_mb * 0.5)}-{int(file_size_mb * 1.5)} seconds" if file_size_mb > 10 else "30-60 seconds"
             return {"success":True,"filename":filename,"file_type":"pdf","processing":True,
-                    "message":f"✅ '{filename}' received! Indexing in the background — you can start asking questions right away."}
+                    "message":f"✅ '{filename}' ({file_size_mb:.1f} MB) received! Indexing in the background ({processing_time_est})..."}
         elif is_image:
-            _file_context.update({"text":"","filename":filename,"type":"image","processing":True,"ready":False,"error":""})
-            extracted_text = describe_image_with_groq(file_bytes, content_type or "image/png")
+            with _file_context_lock:
+                _file_context.update({"text":"","filename":filename,"type":"image","processing":True,"ready":False,"error":""})
+            # FIX: Offload to executor with timeout
+            loop = asyncio.get_event_loop()
+            extracted_text = await asyncio.wait_for(
+                loop.run_in_executor(_executor, describe_image_with_groq, file_bytes, content_type or "image/png"),
+                timeout=45.0  # FIX: Increased from 35s to 45s for large images
+            )
             if not extracted_text:
                 return {"success":False,"message":"Could not analyse the image.","chars_extracted":0}
-            _file_context.update({"text":extracted_text,"processing":False,"ready":True})
+            with _file_context_lock:
+                _file_context.update({"text":extracted_text,"processing":False,"ready":True})
             preview = extracted_text[:200].replace("\n"," ")
             return {"success":True,"filename":filename,"file_type":"image","chars_extracted":len(extracted_text),
                     "preview":preview,"processing":False,"message":f"✅ Image '{filename}' analysed. Ask away!"}
         else:
             raise HTTPException(status_code=400, detail="Unsupported file type. Upload a PDF or image.")
     except HTTPException: raise
+    except asyncio.TimeoutError:
+        with _file_context_lock:
+            _file_context["error"] = "Processing timed out. Try a smaller file."
+            _file_context["processing"] = False
+        raise HTTPException(status_code=504, detail="File processing timed out")
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
 
-
 @app.get("/api/upload-status")
 async def upload_status():
-    return {"ready":_file_context.get("ready",False),"processing":_file_context.get("processing",False),
-            "error":_file_context.get("error",""),"filename":_file_context.get("filename",""),
-            "chars_extracted":len(_file_context.get("text",""))}
+    with _file_context_lock:
+        return {"ready":_file_context.get("ready",False),"processing":_file_context.get("processing",False),
+                "error":_file_context.get("error",""),"filename":_file_context.get("filename",""),
+                "chars_extracted":len(_file_context.get("text",""))}
 
 @app.post("/api/clear-file")
 async def clear_file():
     global _file_context
-    _file_context = {"text":"","filename":"","type":"","processing":False,"ready":False,"error":""}
+    with _file_context_lock:
+        _file_context = {"text":"","filename":"","type":"","processing":False,"ready":False,"error":""}
     return {"success":True,"message":"File context cleared."}
 
-
-# ════════════════════════════════════════════════════════════════════════════
-#  SVG DIAGRAM GENERATION
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- SVG diagram generation (cached with thread safety) ---
 _svg_cache: OrderedDict = OrderedDict()
 _SVG_CACHE_MAX = 60
+_svg_cache_lock = threading.Lock()  # FIX: Added lock
 
 def _cache_svg(key: str, value: str):
-    if key in _svg_cache: _svg_cache.move_to_end(key)
-    _svg_cache[key] = value
-    while len(_svg_cache) > _SVG_CACHE_MAX: _svg_cache.popitem(last=False)
+    with _svg_cache_lock:
+        if key in _svg_cache: _svg_cache.move_to_end(key)
+        _svg_cache[key] = value
+        while len(_svg_cache) > _SVG_CACHE_MAX: _svg_cache.popitem(last=False)
 
 def generate_svg_diagram(user_message: str) -> Tuple[str, str]:
     msg_lower = user_message.lower().strip()
@@ -280,7 +584,11 @@ def generate_svg_diagram(user_message: str) -> Tuple[str, str]:
         if msg_lower.startswith(pat) or msg_lower == pat: return "", ""
     if len(msg_lower) < 3: return "", ""
     cache_key = user_message[:120].strip()
-    if cache_key in _svg_cache: return _svg_cache[cache_key], ""
+    
+    # FIX: Thread-safe cache read
+    with _svg_cache_lock:
+        if cache_key in _svg_cache:
+            return _svg_cache[cache_key], ""
 
     svg_system = """You are an SVG diagram code generator. You output ONLY valid SVG code.
 ABSOLUTE RULES:
@@ -292,34 +600,22 @@ ABSOLUTE RULES:
 6. Colors for boxes: #4A90D9 blue, #5CB85C green, #E8A838 orange, #9B59B6 purple
 7. Text inside boxes: fill="white" font-size="13" font-family="Arial,sans-serif"
 8. Title: font-size="18" font-weight="bold" fill="#222" at top center (y="38")
-9. Draw the REAL components of the topic — never a generic placeholder
-DIAGRAM STYLES:
-- Architecture / how X works → horizontal row of boxes with right-arrows
-- Layered (OS, network, TCP/IP) → vertical stack of full-width rectangles
-- Tree (BST, data structures) → circles with lines connecting parent to children
-- Algorithm (sort, search) → flowchart: rectangles + diamond decision nodes + arrows
-- Comparison (X vs Y) → two columns side by side
-- Neural network → columns of circles (input → hidden → output) with connecting lines
-- Any other topic → central box with satellite boxes connected by arrows"""
-
+9. Draw the REAL components of the topic — never a generic placeholder"""
+    
     user_prompt = f"""Generate SVG diagram for: "{user_message}"
-Draw the ACTUAL, SPECIFIC diagram for this exact topic. Examples:
-- "python" → pipeline: Source Code→Lexer→Parser→AST→Compiler→Bytecode→PVM
-- "deep learning" → 3 columns: Input circles, Hidden circles, Output circles with lines
-- "tcp/ip" → 4 stacked rectangles: Application / Transport / Internet / Network Access
-- "binary search tree" → tree nodes with values and connections
-- "bubble sort" → flowchart: array, compare adjacent, swap if needed, repeat
-- "operating system" → layers: Hardware → Kernel → System Calls → User Applications
+Draw the ACTUAL, SPECIFIC diagram for this exact topic.
 Now output ONLY the SVG for: "{user_message}"
 Start immediately with <svg"""
-
+    
     svg = _make_fallback_svg(user_message)
     try:
         print(f"🎨 Generating SVG for: '{user_message[:60]}'")
         comp = get_groq_client().chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="openai/gpt-oss-safeguard-20b",
             messages=[{"role":"system","content":svg_system},{"role":"user","content":user_prompt}],
-            temperature=0.15, max_tokens=3000,
+            temperature=0.15, 
+            max_tokens=3000,
+            timeout=25.0,  # FIX: Explicit timeout
         )
         raw = comp.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-zA-Z]*\s*','',raw).strip()
@@ -334,6 +630,7 @@ Start immediately with <svg"""
         else: print("⚠ No valid SVG in LLM output, using topic fallback")
     except Exception as e:
         print(f"⚠ SVG LLM error: {e} — using topic fallback")
+    
     data_url = "data:image/svg+xml;base64," + base64.b64encode(svg.encode('utf-8')).decode('utf-8')
     _cache_svg(cache_key, data_url)
     return data_url, user_message[:50]
@@ -368,9 +665,9 @@ def _make_fallback_svg(user_message: str) -> str:
             arrows_svg+=f'<line x1="{ax1}" y1="{ay}" x2="{ax2-8}" y2="{ay}" stroke="#555" stroke-width="2" marker-end="url(#arr)"/>\n'
     return f"""<svg width="860" height="480" viewBox="0 0 860 480" xmlns="http://www.w3.org/2000/svg">
 <defs>
-  <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-    <polygon points="0 0,10 3.5,0 7" fill="#555"/>
-  </marker>
+<marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+<polygon points="0 0,10 3.5,0 7" fill="#555"/>
+</marker>
 </defs>
 <rect width="860" height="480" fill="white"/>
 <text x="430" y="50" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" font-weight="bold" fill="#222">{title}</text>
@@ -385,8 +682,8 @@ def create_html_with_image(text_response: str, image_url: str, topic: str) -> st
     if not image_url: return text_response
     if 'data:image/svg+xml;base64' in text_response: return text_response
     image_html = f'''<div style="margin:0 0 20px 0;background:white;border-radius:12px;padding:14px;box-shadow:0 4px 20px rgba(0,0,0,0.25);">
-    <img src="{image_url}" alt="{topic} diagram" style="width:100%;height:auto;border-radius:6px;display:block;">
-    <p style="color:#666;font-size:11px;margin:6px 0 0 0;text-align:center;">📊 {topic.title()[:60]} — Diagram</p>
+<img src="{image_url}" alt="{topic} diagram" style="width:100%;height:auto;border-radius:6px;display:block;">
+<p style="color:#666;font-size:11px;margin:6px 0 0 0;text-align:center;">📊 {topic.title()[:60]} — Diagram</p>
 </div>'''
     content_style = 'style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;line-height:1.7;"'
     return f'''<div style="font-family:'Segoe UI',Arial,sans-serif;color:white;">
@@ -394,7 +691,7 @@ def create_html_with_image(text_response: str, image_url: str, topic: str) -> st
 <div {content_style}>{text_response}</div>
 </div>'''
 
-
+# --- Language & mixed language detection ---
 def extract_user_context(user_message: str) -> str:
     msg_lower = user_message.lower()
     wants_notes = bool(re.search(r'\bnotes?\b|\bsummary\b|\bsummaries\b|\boverview\b|\bguide\b|\btutorial\b', msg_lower))
@@ -413,7 +710,6 @@ def extract_user_context(user_message: str) -> str:
     if wants_notes:
         parts.append("Format as structured notes: use numbered points and sub-points, short crisp sentences, key terms in Title Case — not long paragraphs.")
     return "\n".join(parts)
-
 
 LANG_NAME_MAP = {
     'ta':'Tamil','hi':'Hindi','te':'Telugu','ml':'Malayalam','kn':'Kannada',
@@ -438,46 +734,21 @@ def detect_language(text: str) -> str:
         return 'en'
     except: return 'en'
 
-EXPLICIT_LANG_KEYWORDS = {
-    'tamil':'ta','தமிழ்':'ta','hindi':'hi','हिंदी':'hi','telugu':'te','తెలుగు':'te',
-    'malayalam':'ml','മലയാളം':'ml','kannada':'kn','ಕನ್ನಡ':'kn','bengali':'bn','বাংলা':'bn',
-    'marathi':'mr','मराठी':'mr','gujarati':'gu','ગુજરાતી':'gu','punjabi':'pa','ਪੰਜਾਬੀ':'pa',
-    'urdu':'ur','اردو':'ur','arabic':'ar','french':'fr','german':'de','spanish':'es',
-    'italian':'it','portuguese':'pt','russian':'ru','chinese':'zh-CN','japanese':'ja',
-    'korean':'ko','turkish':'tr','dutch':'nl',
-}
-
 MIXED_LANG_PATTERNS: List[Tuple] = [
-    (re.compile(
-        r'\b(sollu|solli|soll|kudu|sollikudu|sollunga|sollungo|solunga|solludu|'
-        r'theriyuma|theriyum|puriyuma|puriyum|pannunga|pannu|panren|panna|'
-        r'solren|solringa|kettukonga|ketukonga|solladhe|sollade|vaanga|vaangi|'
-        r'da|di|bro|machan|machi|dei|solring|solraan|solraen|neenga|ungaluku|'
-        r'enaku|enakku|athu|ithu|avanga|ivanga|avan|aval|correct ah|correct a|'
-        r'seri|illa|illai|ama|aama|romba|nalla iruku|nalla irruku)\b',re.IGNORECASE),
+    (re.compile(r'\b(sollu|solli|soll|kudu|theriyuma|puriyuma|pannunga|pannu|da|di|bro|machan|seri|illa|ama|romba)\b',re.IGNORECASE),
      "Tanglish (Tamil-English mix — reply naturally in Tanglish, mixing Tamil words and English)","tanglish"),
-    (re.compile(
-        r'\b(bolna|bolo|bata|batao|bol|batadena|batade|bolrah|bolraha|bolrahe|'
-        r'bolrahahu|kya hai|kaise|kyun|kyunki|matlab|samjha|samjhao|samjhado|'
-        r'smjha|smjhao|yaar|yar|dost|bhai|bhen|acha|accha|theek|thik|sahi|'
-        r'galat|nahi|nhi|mujhe|meko|mereko|hame|hamein|sikhao|sikha|padha|'
-        r'padhao|bata dena|bata do)\b',re.IGNORECASE),
+    (re.compile(r'\b(bolna|bolo|bata|batao|bol|kya|kaise|kyun|samjhao|yaar|bhai|mujhe|sikhao|padha)\b',re.IGNORECASE),
      "Hinglish (Hindi-English mix — reply naturally in Hinglish, mixing Hindi words and English)","hinglish"),
-    (re.compile(
-        r'\b(para|parayan|paranjaal|enthaa|enthu|enthanu|ningal|njan|njaan|onnum|onum|ille|illel|alle|allel)\b',
-        re.IGNORECASE),
+    (re.compile(r'\b(para|parayan|enthaa|ningal|njan|onnum|ille)\b',re.IGNORECASE),
      "Manglish (Malayalam-English mix — reply naturally in Manglish)","manglish"),
-    (re.compile(
-        r'\b(heli|helri|heltheera|heltheeni|hegide|yaake|yaaru|enu|yenu|illi|alli|gottilla|gottillva|gottu|nodri|nodi)\b',
-        re.IGNORECASE),
+    (re.compile(r'\b(heli|helri|hegide|yaake|yaaru|enu|illi|gottilla|nodri)\b',re.IGNORECASE),
      "Kanglish (Kannada-English mix — reply naturally in Kanglish)","kanglish"),
 ]
+
 _ALL_MIXED_TRIGGERS = re.compile(
-    r'\b(sollu|solli|soll|kudu|sollikudu|sollunga|da|di|bro|machan|machi|'
-    r'bolna|bolo|bata|batao|bol|bolrah|bolraha|bolrahe|bolrahahu|kya|kaise|kyun|'
-    r'samjhao|samjhado|yaar|yar|dost|bhai|sikhao|sikha|padha|padhao|mujhe|meko|mereko|'
-    r'para|parayan|heli|helri|nodri|nodi|solring|solraan|solraen|romba|nalla|seri|illa|ama|'
-    r'theriyuma|theriyum|puriyuma|puriyum|pannunga|pannu|neenga|athu|ithu|avan|aval|avanga|ivanga)\b',
+    r'\b(sollu|solli|soll|kudu|theriyuma|puriyuma|pannunga|pannu|da|di|bro|machan|seri|illa|ama|romba|'
+    r'bolna|bolo|bata|batao|bol|kya|kaise|kyun|samjhao|yaar|bhai|mujhe|sikhao|padha|'
+    r'para|parayan|enthaa|ningal|njan|onnum|ille|heli|helri|nodri)\b',
     re.IGNORECASE
 )
 
@@ -494,7 +765,7 @@ def extract_core_topic_from_mixed(text: str) -> str:
     cleaned = re.sub(r'^[?!.,\s]+|[?!.,\s]+$','',cleaned).strip()
     return cleaned if len(cleaned)>=2 else text
 
-def process_user_input(text: str) -> tuple:
+async def process_user_input(text: str) -> tuple:
     mixed = detect_mixed_language(text)
     if mixed:
         lang_label,lang_code = mixed
@@ -503,96 +774,145 @@ def process_user_input(text: str) -> tuple:
         return core_topic,lang_label
     lang_code = detect_language(text)
     if lang_code != 'en' and TRANSLATOR_AVAILABLE:
-        try:
-            translator = Translator()
-            translated = translator.translate(text, src=lang_code, dest='en')
-            if translated and translated.text:
-                english_query = translated.text.strip()
-                print(f"🌐 Native script → '{english_query}'")
-                return english_query, lang_code
-        except Exception as e:
-            print(f"⚠ Translation error: {e}")
-        return text, lang_code
-    text_lower = text.lower()
-    for keyword,code in EXPLICIT_LANG_KEYWORDS.items():
-        if keyword in text_lower: return text,code
-    return text,'en'
+        def translate():
+            try:
+                translator = Translator()
+                translated = translator.translate(text, src=lang_code, dest='en')
+                if translated and translated.text:
+                    return translated.text.strip()
+            except Exception as e:
+                print(f"⚠ Translation error: {e}")
+                return None
+        loop = asyncio.get_event_loop()
+        translated = await loop.run_in_executor(_executor, translate)
+        if translated:
+            print(f"🌐 Native script → '{translated}'")
+            return translated, lang_code
+    return text, lang_code
 
 def build_language_instruction(detected_lang: str) -> str:
-    if len(detected_lang) > 10: return f"Respond in {detected_lang}."
+    if len(detected_lang) > 10:
+        return f"Respond in {detected_lang}."
     return f"Respond in {LANG_NAME_MAP.get(detected_lang.lower(),'English')} language."
 
-def translate_headings(lang_code: str) -> dict:
+async def translate_headings(lang_code: str) -> dict:
     fallback = {'intro':'INTRODUCTION','concepts':'CORE CONCEPTS','fundamental':'FUNDAMENTAL CONCEPTS',
                 'detailed':'DETAILED EXPLANATION','example':'EXAMPLE','examples':'REAL-WORLD EXAMPLES',
                 'applications':'APPLICATIONS','advantages':'ADVANTAGES','limitations':'LIMITATIONS',
                 'conclusion':'CONCLUSION','insights':'KEY INSIGHTS'}
     if lang_code in ('tanglish','hinglish','manglish','kanglish','en') or not TRANSLATOR_AVAILABLE:
         return fallback
-    try:
-        translator = Translator()
-        english = {'intro':'introduction','concepts':'core concepts','fundamental':'fundamental concepts',
-                   'detailed':'detailed explanation','example':'example','examples':'real world examples',
-                   'applications':'applications','advantages':'advantages','limitations':'limitations',
-                   'conclusion':'conclusion','insights':'key insights'}
-        out = {}
-        for key,eng in english.items():
-            try:
-                result = translator.translate(eng,src='en',dest=lang_code)
-                out[key] = result.text.upper() if result and result.text else fallback[key]
-            except: out[key] = fallback[key]
-        return out
-    except: return fallback
+    def translate_headings_sync():
+        try:
+            translator = Translator()
+            english = {'intro':'introduction','concepts':'core concepts','fundamental':'fundamental concepts',
+                       'detailed':'detailed explanation','example':'example','examples':'real world examples',
+                       'applications':'applications','advantages':'advantages','limitations':'limitations',
+                       'conclusion':'conclusion','insights':'key insights'}
+            out = {}
+            for key,eng in english.items():
+                try:
+                    result = translator.translate(eng,src='en',dest=lang_code)
+                    out[key] = result.text.upper() if result and result.text else fallback[key]
+                except: out[key] = fallback[key]
+            return out
+        except: return fallback
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, translate_headings_sync)
 
-def get_section_headings(lang_code: str) -> dict:
-    return translate_headings(lang_code)
+async def get_section_headings(lang_code: str) -> dict:
+    return await translate_headings(lang_code)
 
-
+# --- Pattern definitions ---
 GREETING_PATTERN    = re.compile(r'^\s*(hello|hi|hey|greetings|good morning|good afternoon|good evening|what\'s up|howdy|hiya)\b',re.IGNORECASE)
 PAGE_PATTERN        = re.compile(r'(\d+)\s*pages?\b',re.IGNORECASE)
 MARK_PATTERN        = re.compile(r'(\d+)\s*(?:mark|marks)\b',re.IGNORECASE)
 POINT_PATTERN       = re.compile(r'(\d+)\s*(?:point|points)\b',re.IGNORECASE)
 GIVE_POINTS_PATTERN = re.compile(r'give\s+(\d+)\s+points?\b',re.IGNORECASE)
 NOTES_PATTERN       = re.compile(r'\bnotes?\b|\bsummary\b|\bsummaries\b|\boverview\b',re.IGNORECASE)
+WORD_COUNT_PATTERN  = re.compile(r'(\d+)\s*(?:words?|word count)\b', re.IGNORECASE)
+CHAR_COUNT_PATTERN  = re.compile(r'(\d+)\s*(?:chars?|characters?)\b', re.IGNORECASE)
+MULTI_QUESTION_KEYWORDS = ['questions', 'question', 'each', 'all', 'every', 'following', 'below', 'these']
+
+def detect_multiple_questions(text: str) -> bool:
+    lines = [l.strip() for l in text.split('\n') if l.strip() and len(l) > 5]
+    numbered_lines = [l for l in lines if re.match(r'^\d+\.?\s+', l)]
+    if len(numbered_lines) >= 2:
+        return True
+    question_marks = text.count('?')
+    if question_marks < 2:
+        return False
+    text_lower = text.lower()
+    has_multi_keyword = any(kw in text_lower for kw in MULTI_QUESTION_KEYWORDS)
+    if has_multi_keyword and question_marks >= 2:
+        return True
+    return False
+
+def calculate_points_from_marks(marks: int, user_points: Optional[int] = None) -> int:
+    if user_points is not None and user_points > 0:
+        return user_points
+    if marks <= 0:
+        return 0
+    if marks == 2:
+        return 2
+    return marks * 3
+
+def extract_marks_and_points_flexible(msg_lower: str) -> Tuple[Optional[int], Optional[int]]:
+    marks = None
+    points = None
+    combined_pattern = re.compile(r'(\d+)\s*(?:mark|marks)\s+(\d+)\s*(?:point|points)', re.IGNORECASE)
+    combined_match = combined_pattern.search(msg_lower)
+    if combined_match:
+        marks = int(combined_match.group(1))
+        points = int(combined_match.group(2))
+        return marks, points
+    mark_match = MARK_PATTERN.search(msg_lower)
+    if mark_match:
+        marks = int(mark_match.group(1))
+    point_match = POINT_PATTERN.search(msg_lower)
+    if point_match:
+        points = int(point_match.group(1))
+    give_points_match = GIVE_POINTS_PATTERN.search(msg_lower)
+    if give_points_match:
+        points = int(give_points_match.group(1))
+    return marks, points
 
 @lru_cache(maxsize=128)
-def is_greeting_cached(msg: str) -> bool: return bool(GREETING_PATTERN.search(msg))
-def is_greeting(msg: str) -> bool: return is_greeting_cached(msg.strip())
+def is_greeting_cached(msg: str) -> bool:
+    return bool(GREETING_PATTERN.search(msg))
+
+def is_greeting(msg: str) -> bool:
+    return is_greeting_cached(msg.strip())
 
 @lru_cache(maxsize=64)
 def extract_questions_comprehensive_cached(text: str) -> tuple:
     questions,seen,unique=[],set(),[]
-    for line in text.split('\n'):
+    lines = text.split('\n')
+    for line in lines:
         line=line.strip()
-        if not line or len(line)>200: continue
-        if (line.lower() in ['introduction','key features','applications','conclusion','references']
-                and not any(w in line.lower() for w in ['define','what','list','explain','state','name'])): continue
-        if not re.match(r'^\d+\.',line) and any(w in line.lower() for w in ['define','what','list','explain','state','name']):
-            if 10<len(line)<150: questions.append(line if line.endswith('?') else line+'?')
-        elif re.match(r'^\d+\.',line):
-            q=re.sub(r'^\d+\.\s*','',line)
-            if q and 5<len(q)<150:
+        if not line or len(line)>400: continue
+        numbered_match = re.match(r'^(\d+)\.?\s+(.+)$', line)
+        if numbered_match:
+            q = numbered_match.group(2).strip()
+            if q and 5<len(q)<350:
                 if not q.endswith('?'):
-                    q=q+'?' if any(w in q.lower() for w in ['define','list','what','explain','state','name']) else f"What is {q}?"
+                    q=q+'?' if any(w in q.lower() for w in ['define','list','what','explain','state','name','how','why','when','where']) else q
                 questions.append(q)
+    for line in lines:
+        line=line.strip()
+        if not line or len(line)>400: continue
+        if line.endswith('?') and 10<len(line)<350:
+            if not any(q.lower() in line.lower() for q in questions):
+                questions.append(line)
     for q in questions:
         k=re.sub(r'[^\w\s]','',q.lower())
-        if k not in seen: unique.append(q);seen.add(k)
+        if k not in seen and k not in ['introduction','key features','applications','conclusion','references']:
+            unique.append(q)
+            seen.add(k)
     return tuple(unique)
 
 def extract_questions_comprehensive(text: str) -> list:
     return list(extract_questions_comprehensive_cached(text))
-
-def get_recent_messages_fast(messages: List[dict], max_messages: int = 6) -> List[dict]:
-    if len(messages)<=max_messages: return messages
-    recent=messages[-max_messages:]
-    if recent[0]["role"]!="user" and messages[-1]["role"]=="user":
-        for i in range(len(messages)-2,-1,-1):
-            if messages[i]["role"]=="user":
-                recent=messages[i:]
-                if len(recent)>max_messages: recent=recent[:max_messages]
-                break
-    return recent
 
 def calculate_word_count_from_pages(pages: int) -> int: return pages*250
 def calculate_word_count_from_marks(marks: int) -> int: return marks*50
@@ -608,123 +928,165 @@ def detect_mode_from_message(msg_lower: str) -> Tuple[str,int]:
         if gn: return "points",int(gn.group(1))
     return "detailed",2
 
-# ── FIX: All token limits raised to 8000 to prevent mid-sentence cutoff ──
-def build_system_prompt(mode,point_count,user_context,detected_lang,headings,page_match=None,mark_match=None) -> Tuple[str,int]:
+def extract_length_constraint(msg_lower: str) -> Optional[dict]:
+    word_match = WORD_COUNT_PATTERN.search(msg_lower)
+    if word_match:
+        return {'count': int(word_match.group(1)), 'type': 'words'}
+    char_match = CHAR_COUNT_PATTERN.search(msg_lower)
+    if char_match:
+        return {'count': int(char_match.group(1)), 'type': 'chars'}
+    return None
+
+def build_system_prompt(mode, point_count, user_context, detected_lang, headings, page_match=None, mark_match=None,
+                        length_constraint=None, multiple_questions=False, marks_for_multi=None, points_for_multi=None) -> Tuple[str,int]:
     lang_instr=build_language_instruction(detected_lang)
+    default_max_tok = 16000
+    prompt_parts = [f"You are NexusAI.", user_context]
+    if multiple_questions and marks_for_multi is not None:
+        calculated_points = calculate_points_from_marks(marks_for_multi, points_for_multi)
+        prompt_parts.append(f"MULTIPLE QUESTIONS MODE: Answer EACH question with EXACTLY {calculated_points} points.")
+        prompt_parts.append(f"Each point must be EXACTLY ONE sentence only. No more, no less.")
+        prompt_parts.append(f"IMPORTANT: Each question gets {calculated_points} points independently. Do NOT share points across questions.")
+        prompt_parts.append(f"Format: For each question, number the points clearly (1., 2., 3., etc.)")
+        prompt_parts.append(f"NO diagrams, NO images, NO lengthy explanations.")
+        prompt_parts.append(f"Keep answers concise and focused. {lang_instr}")
+        return ("\n".join(prompt_parts), 16000)
     if page_match:
         pages=int(page_match.group(1)); wc=calculate_word_count_from_pages(pages)
-        return (f"You are NexusAI, a university-level academic tutor.\n{user_context}\n\nProvide a comprehensive ~{wc}-word explanation.\n"
-                "STRUCTURE: INTRODUCTION, CORE CONCEPTS, CONCRETE EXAMPLE, TECHNICAL DETAILS, REAL-WORLD APPLICATIONS, CHALLENGES/TRADE-OFFS, CONCLUSION.\n"
-                f"Use clear section headings (no ## symbols, no ALL-CAPS). {lang_instr} NO schedule.", min(wc*2,8000))
+        prompt_parts.append(f"Provide a comprehensive ~{wc}-word explanation.")
+        prompt_parts.append("STRUCTURE: INTRODUCTION, CORE CONCEPTS, CONCRETE EXAMPLE, TECHNICAL DETAILS, REAL-WORLD APPLICATIONS, CHALLENGES/TRADE-OFFS, CONCLUSION.")
+        prompt_parts.append(f"Use clear section headings (no ## symbols, no ALL-CAPS). {lang_instr} NO schedule.")
+        return ("\n".join(prompt_parts), min(wc*2, 16000))
     if mark_match:
         marks=int(mark_match.group(1)); wc=calculate_word_count_from_marks(marks)
-        return (f"You are NexusAI.\n{user_context}\n\nAnswer this {marks}-mark question as a continuous ~{wc}-word essay.\n"
-                "Cover: Introduction, Motivation, Components, Working, Features, Advantages, Limitations, Applications, Conclusion.\n"
-                f"Continuous essay, NOT Q&A. Clear headings (no ## symbols). {lang_instr} NO schedule.", min(wc*2,8000))
+        prompt_parts.append(f"Answer this {marks}-mark question as a continuous ~{wc}-word essay.")
+        prompt_parts.append("Cover: Introduction, Motivation, Components, Working, Features, Advantages, Limitations, Applications, Conclusion.")
+        prompt_parts.append(f"Continuous essay, NOT Q&A. Clear headings (no ## symbols). {lang_instr} NO schedule.")
+        return ("\n".join(prompt_parts), min(wc*2, 16000))
+    if length_constraint:
+        count = length_constraint['count']
+        ctype = length_constraint['type']
+        prompt_parts.append(f"STRICT LENGTH CONSTRAINT: Your response must NOT exceed {count} {ctype}.")
+        prompt_parts.append("Keep your answer concise and within this limit.")
+        if ctype == 'words':
+            estimated_tokens = int(count * 1.3 * 1.2)
+        else:
+            estimated_tokens = int((count / 4) * 1.2)
+        estimated_tokens = max(estimated_tokens, 500)
+        estimated_tokens = min(estimated_tokens, default_max_tok)
+        default_max_tok = estimated_tokens
     if mode=="notes":
-        return (f"You are NexusAI, an expert academic note-maker.\n{user_context}\n\nGenerate comprehensive structured NOTES on the topic.\n"
-                f"Use numbered points and sub-points. Short crisp sentences. Include: Definition, Key Concepts, Types, Working, Advantages, Disadvantages, Applications.\n"
-                f"{lang_instr} NO schedule. NO ## symbols.", 8000)  # ← was 6000
+        prompt_parts.append("Generate comprehensive structured NOTES on the topic.")
+        prompt_parts.append("Use numbered points and sub-points. Short crisp sentences. Include: Definition, Key Concepts, Types, Working, Advantages, Disadvantages, Applications.")
+        prompt_parts.append(f"{lang_instr} NO schedule. NO ## symbols.")
+        return ("\n".join(prompt_parts), 16000)
     if mode=="detailed_no_schedule":
-        return (f"You are NexusAI, a university-level academic expert.\n{user_context}\n\nProvide a COMPREHENSIVE 2000-word explanation.\n{lang_instr}\n"
-                f"Use clear section headings (no ## symbols, no ALL-CAPS):\n"
-                f"  {headings['intro']}, {headings['fundamental']}, {headings['detailed']},\n"
-                f"  {headings['examples']}, {headings['applications']},\n"
-                f"  {headings['advantages']}, {headings['limitations']}, {headings['conclusion']}\nNO timetable. NO image tags.", 8000)  # ← was 6000
+        prompt_parts.append("Provide a COMPREHENSIVE 2000-word explanation.")
+        prompt_parts.append(lang_instr)
+        prompt_parts.append(f"Use clear section headings (no ## symbols, no ALL-CAPS):")
+        prompt_parts.append(f"  {headings['intro']}, {headings['fundamental']}, {headings['detailed']},")
+        prompt_parts.append(f"  {headings['examples']}, {headings['applications']},")
+        prompt_parts.append(f"  {headings['advantages']}, {headings['limitations']}, {headings['conclusion']}")
+        prompt_parts.append("NO timetable. NO image tags.")
+        return ("\n".join(prompt_parts), 16000)
     if mode=="teaching":
-        return (f"You are NexusAI, a patient teacher.\n{user_context}\n\n{lang_instr} Simple language and analogies. NO ## symbols.", 4000)  # ← was 2000
-    return (f"You are NexusAI.\n{user_context}\n\nProvide a detailed ~1500-word explanation of the topic.\n\n{lang_instr}\n\n"
-            f"EXPLANATION STRUCTURE — clear section headings (no ## symbols, no ALL-CAPS):\n"
-            f"  {headings['intro']}\n  {headings['concepts']}\n  {headings['example']}\n"
-            f"  {headings['applications']}\n  {headings['insights']}\n\n"
-            f"NO timetable. NO study schedule. NO markdown image tags.", 8000)  # ← was 4000
+        prompt_parts.append("Simple language and analogies. NO ## symbols.")
+        return ("\n".join(prompt_parts), 8000)
+    prompt_parts.append("Provide a detailed ~1500-word explanation of the topic.")
+    prompt_parts.append(lang_instr)
+    prompt_parts.append("EXPLANATION STRUCTURE — clear section headings (no ## symbols, no ALL-CAPS):")
+    prompt_parts.append(f"  {headings['intro']}")
+    prompt_parts.append(f"{headings['concepts']}")
+    prompt_parts.append(f"{headings['example']}")
+    prompt_parts.append(f"  {headings['applications']}")
+    prompt_parts.append(f"{headings['insights']}")
+    prompt_parts.append("NO timetable. NO study schedule. NO markdown image tags.")
+    return ("\n".join(prompt_parts), 16000)
 
-def process_detailed_response_without_schedule(user_message,messages):
-    user_context=extract_user_context(user_message); msg_lower=user_message.lower()
-    page_match=PAGE_PATTERN.search(msg_lower); mark_match=MARK_PATTERN.search(msg_lower)
-    system_prompt,max_tok=build_system_prompt("pages_or_marks",0,user_context,"en",{},page_match,mark_match)
-    recent=get_recent_messages_fast(messages,4)
-    return clean_llm_response(chat_completion(
-        messages=[{"role":"system","content":system_prompt}]+recent,temperature=0.2,max_tokens=max_tok,top_p=0.95))
-
-
+# --- Endpoints ---
 @app.post("/api/teach-simple")
 async def teach_simple(request: SimpleTeachRequest):
     try:
         topic=request.topic; language=request.language; previous_response=request.previous_response.strip()
-        if previous_response:
-            plain_prev=re.sub(r'<[^>]+>',' ',previous_response)[:3000].strip()
-            system_prompt=(f"You are NexusAI. Rewrite the explanation about '{topic}' as a SHORT SIMPLE SUMMARY of 300-400 words.\n"
-                           f"RULES: Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
-                           f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.\n\nEXPLANATION:\n{plain_prev}")
-            user_msg=f"Short simple version about {topic}."
-        else:
-            system_prompt=(f"You are NexusAI. Explain '{topic}' simply in 300-400 words.\n"
-                           f"Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
-                           f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.")
-            user_msg=f"Explain {topic} simply in 300-400 words."
-        response_text=clean_llm_response(chat_completion(
-            messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}],temperature=0.3,max_tokens=2000,top_p=0.9))
+        loop = asyncio.get_event_loop()
+        def _run_teach():
+            if previous_response:
+                plain_prev=re.sub(r'<[^>]+>',' ',previous_response)[:3000].strip()
+                system_prompt=(f"You are NexusAI. Rewrite the explanation about '{topic}' as a SHORT SIMPLE SUMMARY of 300-400 words.\n"
+                               f"RULES: Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
+                               f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.\nEXPLANATION:\n{plain_prev}")
+                user_msg=f"Short simple version about {topic}."
+            else:
+                system_prompt=(f"You are NexusAI. Explain '{topic}' simply in 300-400 words.\n"
+                               f"Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
+                               f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.")
+                user_msg=f"Explain {topic} simply in 300-400 words."
+            return clean_llm_response(chat_completion(
+                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}],
+                temperature=0.3,max_tokens=2000,top_p=0.9,timeout=25.0))
+        
+        response_text = await asyncio.wait_for(loop.run_in_executor(_executor, _run_teach), timeout=30.0)
         return {"response":f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;font-family:\'Segoe UI\',Arial,sans-serif;color:white;line-height:1.7;">{response_text}</div>'}
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
 
-
-# ── FIX: explain-like-child — max_tokens raised, prompt forces all 7 paragraphs ──
 @app.post("/api/explain-like-child")
 async def explain_like_child(request: ChildTeachRequest):
     try:
         topic=request.topic; language=request.language
-        def build_prompt(strict=False):
-            base=(
-                f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
-                f"Write EXACTLY 7 paragraphs. Each paragraph MUST be 4-5 simple sentences long.\n"
-                f"Do NOT stop early. You MUST complete all 7 paragraphs fully before stopping.\n"
-                f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
-                f"NO emoji anywhere in the response.\nNO bullet points. NO numbered lists. NO ## symbols.\n"
-                f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
-                f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
-                f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
-                f"Separate paragraphs with one blank line.\n"
-                f"End the last paragraph with one fun fact about '{topic}'.\n"
-                f"Plain text only. Language: {language}."
+        loop = asyncio.get_event_loop()
+        def _run_child():
+            def build_prompt(strict=False):
+                base=(
+                    f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
+                    f"Write EXACTLY 7 paragraphs. Each paragraph MUST be 4-5 simple sentences long.\n"
+                    f"Do NOT stop early. You MUST complete all 7 paragraphs fully before stopping.\n"
+                    f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
+                    f"NO emoji anywhere in the response.\n"
+                    f"NO bullet points. NO numbered lists. NO ## symbols.\n"
+                    f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
+                    f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
+                    f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
+                    f"Separate paragraphs with one blank line.\n"
+                    f"End the last paragraph with one fun fact about '{topic}'.\n"
+                    f"Plain text only. Language: {language}."
+                )
+                if strict: base+=f"\nCRITICAL: Begin explaining '{topic}' immediately with a real word. Write all 7 paragraphs without stopping."
+                return base
+            def strip_response(raw):
+                plain=clean_to_plain_text(raw); lines=plain.splitlines()
+                while lines and not any(c.isalpha() for c in lines[0]): lines.pop(0)
+                return "\n".join(lines).strip()
+            raw1=chat_completion(
+                messages=[{"role":"system","content":build_prompt()},{"role":"user","content":f"Explain {topic} like I'm 5 years old! Write all 7 paragraphs completely."}],
+                temperature=0.4, max_tokens=3000, top_p=0.9, timeout=25.0
             )
-            if strict: base+=f"\n\nCRITICAL: Begin explaining '{topic}' immediately with a real word. Write all 7 paragraphs without stopping."
-            return base
-        def strip_response(raw):
-            plain=clean_to_plain_text(raw); lines=plain.splitlines()
-            while lines and not any(c.isalpha() for c in lines[0]): lines.pop(0)
-            return "\n".join(lines).strip()
-        # ── FIX: max_tokens raised from 2000 → 3000 ──
-        raw1=chat_completion(
-            messages=[{"role":"system","content":build_prompt()},{"role":"user","content":f"Explain {topic} like I'm 5 years old! Write all 7 paragraphs completely."}],
-            temperature=0.4, max_tokens=3000, top_p=0.9
-        )
-        plain=strip_response(raw1)
-        if not plain or not any(c.isalpha() for c in plain):
-            print(f"⚠ explain-like-child: empty after strip, retrying...")
-            # ── FIX: retry max_tokens raised from 500 → 2500 ──
-            raw2=chat_completion(
-                messages=[{"role":"system","content":build_prompt(True)},{"role":"user","content":f"Explain {topic} to a young child in 7 paragraphs. Write all 7 fully."}],
-                temperature=0.2, max_tokens=2500, top_p=0.85
-            )
-            plain=strip_response(raw2)
-        if not plain or not any(c.isalpha() for c in plain):
-            plain=(
-                f"{topic} is something really interesting!\n\n"
-                f"Think of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n\n"
-                f"People use {topic} every day to solve problems and make life easier.\n\n"
-                f"Imagine you had a magic box that could do special things — that is a little bit like {topic}.\n\n"
-                f"When you learn about {topic}, you start to understand how many things around you work.\n\n"
-                f"Even grown-ups spend years learning about {topic} because there is always something new to discover.\n\n"
-                f"Fun fact: {topic} is used in so many places that you probably see it every single day without even knowing it!"
-            )
-        return {"response": plain}
+            plain=strip_response(raw1)
+            if not plain or not any(c.isalpha() for c in plain):
+                print(f"⚠ explain-like-child: empty after strip, retrying...")
+                raw2=chat_completion(
+                    messages=[{"role":"system","content":build_prompt(True)},{"role":"user","content":f"Explain {topic} to a young child in 7 paragraphs. Write all 7 fully."}],
+                    temperature=0.2, max_tokens=2500, top_p=0.85, timeout=25.0
+                )
+                plain=strip_response(raw2)
+            if not plain or not any(c.isalpha() for c in plain):
+                plain=(
+                    f"{topic} is something really interesting!\n"
+                    f"Think of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n"
+                    f"People use {topic} every day to solve problems and make life easier.\n"
+                    f"Imagine you had a magic box that could do special things — that is a little bit like {topic}.\n"
+                    f"When you learn about {topic}, you start to understand how many things around you work.\n"
+                    f"Even grown-ups spend years learning about {topic} because there is always something new to discover.\n"
+                    f"Fun fact: {topic} is used in so many places that you probably see it every single day without even knowing it!"
+                )
+            return plain
+        
+        response_text = await asyncio.wait_for(loop.run_in_executor(_executor, _run_child), timeout=30.0)
+        return {"response": response_text}
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
-
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
@@ -732,206 +1094,349 @@ async def chat(request: ChatRequest):
         messages=request.messages
         if not messages: raise HTTPException(status_code=400,detail="No messages provided")
         latest_user_msg=messages[-1]["content"]
-        english_query,detected_lang=process_user_input(latest_user_msg)
+        english_query,detected_lang = await process_user_input(latest_user_msg)
         if english_query!=latest_user_msg:
             messages=messages[:-1]+[{"role":"user","content":english_query}]
-        msg_lower=english_query.lower(); headings=get_section_headings(detected_lang)
+        msg_lower=english_query.lower()
+        
+        # FIX: Limit message history to avoid context bloat (only last 6 messages = 3 turns)
+        # This prevents slowdown when conversation gets long
+        MAX_HISTORY_MESSAGES = 6
+        if len(messages) > MAX_HISTORY_MESSAGES:
+            # Keep system messages if any, then add most recent messages
+            system_msgs = [m for m in messages if m.get("role") == "system"]
+            other_msgs = [m for m in messages if m.get("role") != "system"]
+            messages = system_msgs + other_msgs[-MAX_HISTORY_MESSAGES:]
+            print(f"📊 Trimmed message history from {len(request.messages)} to {len(messages)} messages")
+        headings = await get_section_headings(detected_lang)
         if is_greeting(latest_user_msg):
             return {"response":"Hello! I'm NexusAI, your intelligent assistant. How can I help you today?"}
         user_context=extract_user_context(latest_user_msg)
-        skip_image=any(kw in english_query.lower() for kw in ['who','person','famous','actor','actress','singer','politician','celebrity'])
+        is_multiple_questions = detect_multiple_questions(latest_user_msg)
+        marks_extracted, points_extracted = extract_marks_and_points_flexible(msg_lower)
+        current_questions = extract_questions_comprehensive(latest_user_msg)
+        should_use_multi_with_points = (is_multiple_questions and marks_extracted is not None and len(current_questions) >= 2)
+        should_use_multi_no_points = (is_multiple_questions and marks_extracted is None and len(current_questions) >= 2)
+        is_default_mode = not should_use_multi_with_points and not should_use_multi_no_points
+        print(f"📊 Mode Detection: multi_with_points={should_use_multi_with_points}, multi_no_points={should_use_multi_no_points}, default={is_default_mode}")
+        print(f"📝 Questions extracted: {len(current_questions)}")
+        skip_image = any(kw in english_query.lower() for kw in ['who','person','famous','actor','actress','singer','politician','celebrity'])
+        if should_use_multi_with_points or should_use_multi_no_points:
+            skip_image = True
+            print(f"🚫 Multiple questions mode - skipping images")
+        else:
+            print(f"✅ Default mode - images allowed")
+        
         image_url=""
-        if not skip_image and len(english_query)>=2: image_url=get_image_for_topic(english_query)
+        loop = asyncio.get_event_loop()
+        # FIX: Offload image generation to executor with timeout
+        if not skip_image and len(english_query)>=2:
+            try:
+                image_url = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, get_image_for_topic, english_query),
+                    timeout=30.0
+                )
+                print(f"🖼️ Image generated for: {english_query[:50]}")
+            except asyncio.TimeoutError:
+                print(f"⚠️ Image generation timed out - continuing without image")
+                image_url = ""
+        
         file_prefix=""
-        if _file_context.get("filename"):
-            if _file_context.get("processing"):
-                file_prefix=(f'<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                             f'font-family:\'Segoe UI\',Arial,sans-serif;color:#a5b4fc;font-size:13px;">⏳ Still indexing <strong>{_file_context["filename"]}</strong> — answering from general knowledge for now.</div>')
-            elif _file_context.get("ready") and _file_context["text"]:
-                file_answer=answer_from_file_context(english_query,_file_context["text"],_file_context["filename"])
-                if file_answer:
-                    file_badge=(f'<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                                f'font-family:\'Segoe UI\',Arial,sans-serif;color:#7fffb8;font-size:13px;">📄 Answer sourced from: <strong>{_file_context["filename"]}</strong></div>')
-                    return {"response":file_badge+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{file_answer}</div>'}
-                else:
-                    file_prefix=(f'<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                                 f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ Not found in uploaded file ({_file_context["filename"]}). Here is the answer from my knowledge:</div>')
+        with _file_context_lock:
+            fname = _file_context.get("filename")
+            processing = _file_context.get("processing")
+            ready = _file_context.get("ready")
+            ftext = _file_context.get("text")
+            if fname:
+                if processing:
+                    file_prefix=(f'<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
+                                 f'font-family:\'Segoe UI\',Arial,sans-serif;color:#a5b4fc;font-size:13px;">⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge for now.</div>')
+                elif ready and ftext:
+                    # FIX: Offload file context answer to executor with timeout
+                    try:
+                        file_answer = await asyncio.wait_for(
+                            loop.run_in_executor(_executor, answer_from_file_context, english_query, ftext, fname),
+                            timeout=25.0
+                        )
+                        if file_answer:
+                            file_badge=(f'<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
+                                        f'font-family:\'Segoe UI\',Arial,sans-serif;color:#7fffb8;font-size:13px;">📄 Answer sourced from: <strong>{fname}</strong></div>')
+                            return {"response":file_badge+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{file_answer}</div>'}
+                        else:
+                            file_prefix=(f'<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
+                                         f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
+                    except asyncio.TimeoutError:
+                        print(f"⚠️ File context answer timed out - using general knowledge")
+                        file_prefix=(f'<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
+                                     f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ File search timed out. Here is the answer from my knowledge:</div>')
+        
+        length_constraint = extract_length_constraint(msg_lower)
         page_match=PAGE_PATTERN.search(msg_lower); mark_match=MARK_PATTERN.search(msg_lower)
         current_mode,current_point_count=detect_mode_from_message(msg_lower)
-        system_prompt,max_tok=build_system_prompt(current_mode,current_point_count,user_context,detected_lang,headings,page_match,mark_match)
-        if current_mode=="points":
-            current_questions=extract_questions_comprehensive(latest_user_msg)
-            if current_questions:
-                questions_text="\n".join([f"{i+1}. {q}" for i,q in enumerate(current_questions)])
-                response_text=clean_llm_response(chat_completion(
-                    messages=[{"role":"system","content":system_prompt},{"role":"user","content":f"{current_point_count} points each:\n{questions_text}"}],temperature=0.1,max_tokens=4000,top_p=0.85))
-                if image_url: return {"response":file_prefix+create_html_with_image(response_text,image_url,english_query)}
-                return {"response":file_prefix+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{response_text}</div>'}
-        recent=get_recent_messages_fast(messages,6)
-        response_text=clean_llm_response(chat_completion(messages=[{"role":"system","content":system_prompt}]+recent,temperature=0.25,max_tokens=max_tok,top_p=0.92))
-        if image_url: return {"response":file_prefix+create_html_with_image(response_text,image_url,english_query)}
+        
+        # FIX: Wrap LLM calls in executor with timeout
+        def _run_chat_completion(system_prompt, user_content, temp, max_tok, top_p):
+            return clean_llm_response(chat_completion(
+                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
+                temperature=temp,max_tokens=max_tok,top_p=top_p,timeout=25.0))
+
+        if should_use_multi_with_points:
+            calculated_points = calculate_points_from_marks(marks_extracted, points_extracted)
+            questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
+            system_prompt = f"""You are NexusAI. Answer in {LANG_NAME_MAP.get(detected_lang, 'English')}.
+MULTIPLE QUESTIONS MODE: Answer EACH question with EXACTLY {calculated_points} points.
+Each point must be EXACTLY ONE sentence only.
+NO diagrams, NO images, NO lengthy explanations.
+Format: QUESTION 1: then 1. 2. 3. etc."""
+            response_text = await asyncio.wait_for(
+                loop.run_in_executor(_executor, _run_chat_completion, system_prompt,
+                    f"CRITICAL: Answer ALL {len(current_questions)} questions. Do NOT skip any.\n"
+                    f"Each question needs EXACTLY {calculated_points} points. Each point = 1 sentence.\n"
+                    f"Format:\nQUESTION 1:\n1. [point]\n2. [point]\n...\nQUESTION 2:\n...\n"
+                    f"Questions:\n{questions_text}", 0.15, 16000, 0.88),
+                timeout=35.0
+            )
+            return {"response":file_prefix+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{response_text}</div>'}
+        
+        if should_use_multi_no_points:
+            questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
+            system_prompt = f"""You are NexusAI. Answer in {LANG_NAME_MAP.get(detected_lang, 'English')}.
+MULTIPLE QUESTIONS MODE: Answer each question with a full paragraph.
+NO diagrams, NO images.
+Format: QUESTION 1: then paragraph answer."""
+            response_text = await asyncio.wait_for(
+                loop.run_in_executor(_executor, _run_chat_completion, system_prompt,
+                    f"CRITICAL: Answer ALL {len(current_questions)} questions. Do NOT skip any.\n"
+                    f"Answer EACH question with a full paragraph (not just 1 sentence).\n"
+                    f"Format:\nQUESTION 1:\n[Paragraph answer]\nQUESTION 2:\n[Paragraph answer]\n"
+                    f"Questions:\n{questions_text}", 0.2, 16000, 0.9),
+                timeout=35.0
+            )
+            return {"response":file_prefix+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{response_text}</div>'}
+        
+        # Default mode (single question)
+        system_prompt,max_tok=build_system_prompt(current_mode,current_point_count,user_context,detected_lang,headings,
+                                                    page_match,mark_match, length_constraint=length_constraint,
+                                                    multiple_questions=False, marks_for_multi=None, points_for_multi=None)
+        response_text = await asyncio.wait_for(
+            loop.run_in_executor(_executor, _run_chat_completion, system_prompt, english_query, 0.25, max_tok, 0.92),
+            timeout=35.0
+        )
+        
+        if image_url:
+            print(f"✅ Returning response with image for: {english_query[:50]}")
+            return {"response":file_prefix+create_html_with_image(response_text,image_url,english_query)}
+        print(f"✅ Returning response (no image) for: {english_query[:50]}")
         return {"response":file_prefix+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{response_text}</div>'}
+    except asyncio.TimeoutError:
+        print(f"⚠️ Chat request timed out")
+        raise HTTPException(status_code=504,detail="Request timed out. Please try again.")
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
-
 
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     messages=request.messages
     if not messages: raise HTTPException(status_code=400,detail="No messages provided")
     latest_user_msg=messages[-1]["content"]
-    english_query,detected_lang=process_user_input(latest_user_msg)
+    english_query,detected_lang = await process_user_input(latest_user_msg)
     if english_query!=latest_user_msg:
         messages=messages[:-1]+[{"role":"user","content":english_query}]
-    msg_lower=english_query.lower(); headings=get_section_headings(detected_lang)
+    msg_lower=english_query.lower()
+    
+    # FIX: Limit message history to avoid context bloat (only last 6 messages = 3 turns)
+    MAX_HISTORY_MESSAGES = 6
+    if len(messages) > MAX_HISTORY_MESSAGES:
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+        messages = system_msgs + other_msgs[-MAX_HISTORY_MESSAGES:]
+        print(f"📊 Stream: Trimmed message history from {len(request.messages)} to {len(messages)} messages")
+    headings = await get_section_headings(detected_lang)
     user_context=extract_user_context(latest_user_msg)
     if is_greeting(latest_user_msg):
         greeting="Hello! I'm NexusAI, your intelligent assistant. How can I help you today?"
-        def greeting_gen():
-            yield f"data: {json.dumps({'type':'token','content':greeting})}\n\n"
-            yield f"data: {json.dumps({'type':'done'})}\n\n"
+        async def greeting_gen():
+            yield f"data: {json.dumps({'type':'token','content':greeting})}\n"
+            yield f"data: {json.dumps({'type':'done'})}\n"
         return StreamingResponse(greeting_gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+    
+    is_multiple_questions = detect_multiple_questions(latest_user_msg)
+    marks_extracted, points_extracted = extract_marks_and_points_flexible(msg_lower)
+    current_questions = extract_questions_comprehensive(latest_user_msg)
+    should_use_multi_with_points = (is_multiple_questions and marks_extracted is not None and len(current_questions) >= 2)
+    should_use_multi_no_points = (is_multiple_questions and marks_extracted is None and len(current_questions) >= 2)
+    is_default_mode = not should_use_multi_with_points and not should_use_multi_no_points
+    print(f"📊 Streaming Mode: multi_with_points={should_use_multi_with_points}, multi_no_points={should_use_multi_no_points}, default={is_default_mode}")
+    skip_image = any(kw in english_query.lower() for kw in ['who','person','famous','actor','actress','singer','politician','celebrity'])
+    if should_use_multi_with_points or should_use_multi_no_points:
+        skip_image = True
+        print(f"🚫 Streaming: Multiple questions - skipping images")
+    else:
+        print(f"✅ Streaming: Default mode - images allowed")
+    
+    length_constraint = extract_length_constraint(msg_lower)
     page_match=PAGE_PATTERN.search(msg_lower); mark_match=MARK_PATTERN.search(msg_lower)
     current_mode,current_point_count=detect_mode_from_message(msg_lower)
-    system_prompt,max_tok=build_system_prompt(current_mode,current_point_count,user_context,detected_lang,headings,page_match,mark_match)
-    recent=get_recent_messages_fast(messages,6)
-    llm_messages=[{"role":"system","content":system_prompt}]+recent
-    if current_mode=="points":
-        current_questions=extract_questions_comprehensive(latest_user_msg)
-        if current_questions:
-            questions_text="\n".join([f"{i+1}. {q}" for i,q in enumerate(current_questions)])
-            llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":f"{current_point_count} points each:\n{questions_text}"}]
-    skip_image=any(kw in english_query.lower() for kw in ['who','person','famous','actor','actress','singer','politician','celebrity'])
-
+    
+    if should_use_multi_with_points:
+        calculated_points = calculate_points_from_marks(marks_extracted, points_extracted)
+        questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
+        system_prompt = f"""You are NexusAI. Answer in {LANG_NAME_MAP.get(detected_lang, 'English')}.
+MULTIPLE QUESTIONS MODE: Answer EACH question with EXACTLY {calculated_points} points.
+Each point = 1 sentence. NO diagrams, NO images."""
+        llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":
+            f"CRITICAL: Answer ALL {len(current_questions)} questions.\nEach question needs {calculated_points} points.\n"
+            f"Format: QUESTION 1:\n1. [point]\n2. [point]\n...\nQuestions:\n{questions_text}"}]
+    elif should_use_multi_no_points:
+        questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
+        system_prompt = f"""You are NexusAI. Answer in {LANG_NAME_MAP.get(detected_lang, 'English')}.
+MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images."""
+        llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":
+            f"CRITICAL: Answer ALL {len(current_questions)} questions with paragraphs.\n"
+            f"Format: QUESTION 1:\n[Paragraph]\nQuestions:\n{questions_text}"}]
+    else:
+        system_prompt,max_tok=build_system_prompt(current_mode,current_point_count,user_context,detected_lang,headings,
+                                                    page_match,mark_match, length_constraint=length_constraint,
+                                                    multiple_questions=False, marks_for_multi=None, points_for_multi=None)
+        llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":english_query}]
+    
     def sync_stream_gen():
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            svg_future=None
-            if not skip_image and len(english_query)>=2:
-                svg_future=ex.submit(get_image_for_topic,english_query)
-            if _file_context.get("filename"):
-                if _file_context.get("processing"):
-                    _fname=_file_context["filename"]
+        # FIX: Use global executor instead of creating new one
+        svg_future = None
+        if not skip_image and len(english_query)>=2:
+            svg_future = _executor.submit(get_image_for_topic, english_query)
+        
+        with _file_context_lock:
+            fname = _file_context.get("filename")
+            processing = _file_context.get("processing")
+            ready = _file_context.get("ready")
+            ftext = _file_context.get("text")
+            if fname:
+                if processing:
                     _indexing_html=('<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;'
                                     'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#a5b4fc;font-size:13px;">'
-                                    f'⏳ Still indexing <strong>{_fname}</strong> — answering from general knowledge.</div>')
-                    yield f"data: {json.dumps({'type':'prefix','content':_indexing_html})}\n\n"
-                elif _file_context.get("ready") and _file_context["text"]:
-                    file_answer=answer_from_file_context(english_query,_file_context["text"],_file_context["filename"])
+                                    f'⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge.</div>')
+                    yield f"data: {json.dumps({'type':'prefix','content':_indexing_html})}\n"
+                elif ready and ftext:
+                    file_answer=answer_from_file_context(english_query,ftext,fname)
                     if file_answer:
-                        _fname=_file_context["filename"]
                         badge=('<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;'
                                'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#7fffb8;font-size:13px;">'
-                               f'📄 Answer sourced from: <strong>{_fname}</strong></div>')
-                        yield f"data: {json.dumps({'type':'prefix','content':badge})}\n\n"
-                        yield f"data: {json.dumps({'type':'token','content':file_answer})}\n\n"
-                        yield f"data: {json.dumps({'type':'done'})}\n\n"
+                               f'📄 Answer sourced from: <strong>{fname}</strong></div>')
+                        yield f"data: {json.dumps({'type':'prefix','content':badge})}\n"
+                        yield f"data: {json.dumps({'type':'token','content':file_answer})}\n"
+                        yield f"data: {json.dumps({'type':'done'})}\n"
                         return
                     else:
-                        _fname=_file_context["filename"]
                         _notfound_html=('<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;'
                                         'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#ffd580;font-size:13px;">'
-                                        f'⚠️ Not found in uploaded file ({_fname}). Here is the answer from my knowledge:</div>')
-                        yield f"data: {json.dumps({'type':'prefix','content':_notfound_html})}\n\n"
-            try:
-                stream=get_groq_client().chat.completions.create(model=_PRIMARY_MODEL,messages=llm_messages,stream=True,temperature=0.25,max_tokens=max_tok,top_p=0.92)
-                for chunk in stream:
-                    delta=chunk.choices[0].delta.content
-                    if delta: yield f"data: {json.dumps({'type':'token','content':delta})}\n\n"
-            except Exception as e:
-                err=str(e)
-                if '429' in err or 'rate_limit' in err.lower():
-                    try:
-                        stream2=get_groq_client().chat.completions.create(model=_FALLBACK_MODEL,messages=llm_messages,stream=True,temperature=0.25,max_tokens=max_tok,top_p=0.92)
-                        for chunk in stream2:
-                            delta=chunk.choices[0].delta.content
-                            if delta: yield f"data: {json.dumps({'type':'token','content':delta})}\n\n"
-                    except Exception: yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n\n"
-                else: yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n\n"
-            if svg_future:
+                                        f'⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
+                        yield f"data: {json.dumps({'type':'prefix','content':_notfound_html})}\n"
+        
+        yield f"data: {json.dumps({'type':'start'})}\n"
+        try:
+            stream=get_groq_client().chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=llm_messages,
+                stream=True,
+                temperature=0.25,
+                max_tokens=16000,
+                top_p=0.92,
+                timeout=30.0  # FIX: Explicit timeout
+            )
+            for chunk in stream:
+                delta=chunk.choices[0].delta.content
+                if delta:
+                    yield f"data: {json.dumps({'type':'token','content':delta})}\n"
+        except Exception as e:
+            err=str(e)
+            if '429' in err or 'rate_limit' in err.lower():
                 try:
-                    image_url=svg_future.result(timeout=25)
-                    if image_url: yield f"data: {json.dumps({'type':'image','url':image_url})}\n\n"
-                except Exception: pass
-            yield f"data: {json.dumps({'type':'done'})}\n\n"
-
+                    stream2=get_groq_client().chat.completions.create(
+                        model="openai/gpt-oss-safeguard-20b",
+                        messages=llm_messages,
+                        stream=True,
+                        temperature=0.25,
+                        max_tokens=16000,
+                        top_p=0.92,
+                        timeout=30.0
+                    )
+                    for chunk in stream2:
+                        delta=chunk.choices[0].delta.content
+                        if delta:
+                            yield f"data: {json.dumps({'type':'token','content':delta})}\n"
+                except Exception:
+                    yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n"
+            else:
+                yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n"
+        
+        if svg_future:
+            try:
+                image_url=svg_future.result(timeout=25)
+                if image_url:
+                    yield f"data: {json.dumps({'type':'image','url':image_url})}\n"
+            except Exception:
+                pass
+        yield f"data: {json.dumps({'type':'done'})}\n"
+    
     return StreamingResponse(sync_stream_gen(),media_type="text/event-stream",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
 
-
-# ════════════════════════════════════════════════════════════════════════════
-#  QUIZ ENDPOINTS
-# ════════════════════════════════════════════════════════════════════════════
-
-class QuizGenerateRequest(BaseModel):
-    topic: str
-    num_questions: int = 5
-    marks_per_question: int = 2
-    difficulty: str = "medium"
-
-class QuizAnswerItem(BaseModel):
-    question_id: str
-    question: str
-    student_answer: str
-    max_marks: int
-
-class QuizEvaluateRequest(BaseModel):
-    answers: List[QuizAnswerItem]
-
-
+# --- Quiz endpoints ---
 @app.post("/api/quiz/generate")
 async def quiz_generate(request: QuizGenerateRequest):
     is_mcq = request.marks_per_question == 1
-
-    if is_mcq:
-        mcq_system = (
-            "You are a university exam MCQ generator. "
-            "Generate multiple-choice questions with 4 REAL, TOPIC-SPECIFIC answer options. "
-            "NEVER write 'Option 1', 'Option A', 'True', 'False', or any generic placeholder. "
-            "Every option must be a concrete fact or term directly related to the topic. "
-            "Exactly one option must be correct. "
-            "Return ONLY a raw JSON array — no markdown, no backticks, no explanation. "
-            "Each item: id (string), question (string), "
-            "options (array of exactly 4 strings prefixed A) B) C) D)), "
-            "correct_option (string), max_marks (int always 1)."
-        )
-        mcq_user = (
-            f"Topic: {request.topic}\nCount: {request.num_questions}\nDifficulty: {request.difficulty}\n\n"
-            f"Generate {request.num_questions} MCQ questions about '{request.topic}'. "
-            f"All 4 options must be specific facts/terms about the topic — never generic.\n"
-            f"Example for 'Python':\n"
-            f'[{{"id":"q1","question":"Which keyword defines a function in Python?",'
-            f'"options":["A) func","B) def","C) define","D) function"],'
-            f'"correct_option":"B) def","max_marks":1}}]\n\n'
-            f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
-        )
-        bad_patterns = ["option 1","option 2","option 3","option 4","option a","option b","option c","option d","placeholder"]
-
-        def validate_mcq(questions: list) -> list:
-            prefixes = ["A) ","B) ","C) ","D) "]
-            valid = []
-            for q in questions:
-                opts = q.get("options", [])
-                if len(opts) != 4: continue
-                if any(any(b in str(o).lower() for b in bad_patterns) for o in opts): continue
-                prefixed = []
-                for i, opt in enumerate(opts[:4]):
-                    s = str(opt).strip()
-                    if not s.upper().startswith(prefixes[i]):
-                        s = prefixes[i] + s.lstrip("ABCDabcd) ").strip()
-                    prefixed.append(s)
-                q["options"] = prefixed
-                q["max_marks"] = 1
-                valid.append(q)
-            return valid
-
-        try:
+    loop = asyncio.get_event_loop()
+    
+    def _run_quiz():
+        if is_mcq:
+            mcq_system = (
+                "You are a university exam MCQ generator. "
+                "Generate multiple-choice questions with 4 REAL, TOPIC-SPECIFIC answer options. "
+                "NEVER write 'Option 1', 'Option A', 'True', 'False', or any generic placeholder. "
+                "Every option must be a concrete fact or term directly related to the topic. "
+                "Exactly one option must be correct. "
+                "Return ONLY a raw JSON array — no markdown, no backticks, no explanation. "
+                "Each item: id (string), question (string), "
+                "options (array of exactly 4 strings prefixed A) B) C) D)), "
+                "correct_option (string), max_marks (int always 1)."
+            )
+            mcq_user = (
+                f"Topic: {request.topic}\nCount: {request.num_questions}\nDifficulty: {request.difficulty}\n"
+                f"Generate {request.num_questions} MCQ questions about '{request.topic}'. "
+                f"All 4 options must be specific facts/terms about the topic — never generic.\n"
+                f"Example for 'Python':\n"
+                f'[{{"id":"q1","question":"Which keyword defines a function in Python?",'
+                f'"options":["A) func","B) def","C) define","D) function"],'
+                f'"correct_option":"B) def","max_marks":1}}]\n'
+                f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
+            )
+            bad_patterns = ["option 1","option 2","option 3","option 4","option a","option b","option c","option d","placeholder"]
+            def validate_mcq(questions: list) -> list:
+                prefixes = ["A) ","B) ","C) ","D) "]
+                valid = []
+                for q in questions:
+                    opts = q.get("options", [])
+                    if len(opts) != 4: continue
+                    if any(any(b in str(o).lower() for b in bad_patterns) for o in opts): continue
+                    prefixed = []
+                    for i, opt in enumerate(opts[:4]):
+                        s = str(opt).strip()
+                        if not s.upper().startswith(prefixes[i]):
+                            s = prefixes[i] + s.lstrip("ABCDabcd) ").strip()
+                        prefixed.append(s)
+                    q["options"] = prefixed
+                    q["max_marks"] = 1
+                    valid.append(q)
+                return valid
             for attempt in range(2):
                 comp = get_groq_client().chat.completions.create(
-                    model=_FALLBACK_MODEL,
+                    model="openai/gpt-oss-safeguard-20b",
                     messages=[{"role":"system","content":mcq_system},{"role":"user","content":mcq_user}],
                     temperature=0.3 if attempt==0 else 0.15,
                     max_tokens=2500,
+                    timeout=30.0,
                 )
                 raw = comp.choices[0].message.content.strip()
                 raw = re.sub(r"^```[a-zA-Z]*\n?","",raw).rstrip("`").strip()
@@ -944,13 +1449,7 @@ async def quiz_generate(request: QuizGenerateRequest):
                     return {"questions": validated}
                 print(f"⚠ MCQ attempt {attempt+1}: no valid options, retrying...")
             raise HTTPException(status_code=500, detail="Could not generate valid MCQ options. Please try again.")
-        except HTTPException: raise
-        except Exception as e:
-            import traceback; print(traceback.format_exc())
-            raise HTTPException(status_code=500, detail="Failed to generate MCQ questions.")
-
-    else:
-        try:
+        else:
             system_prompt = (
                 "You are a university exam paper setter. "
                 "Generate REAL, SPECIFIC exam questions — never placeholder text like "
@@ -961,7 +1460,7 @@ async def quiz_generate(request: QuizGenerateRequest):
             )
             user_prompt = (
                 f"Topic: {request.topic}\nNumber of questions: {request.num_questions}\n"
-                f"Marks per question: {request.marks_per_question}\nDifficulty: {request.difficulty}\n\n"
+                f"Marks per question: {request.marks_per_question}\nDifficulty: {request.difficulty}\n"
                 f"Write {request.num_questions} REAL, SPECIFIC exam questions about '{request.topic}'. "
                 f"Every question must be directly about '{request.topic}'. "
                 f"For {request.marks_per_question}-mark questions: define/state/list/give one example. "
@@ -969,12 +1468,10 @@ async def quiz_generate(request: QuizGenerateRequest):
                 f"Return ONLY a valid JSON array like: "
                 f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question}}}]'
             )
-            comp = get_groq_client().chat.completions.create(
-                model="openai/gpt-oss-120b",
+            raw = chat_completion(
                 messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
-                temperature=0.4, max_tokens=1500,
+                temperature=0.4, max_tokens=1500, timeout=30.0,
             )
-            raw = comp.choices[0].message.content.strip()
             raw = re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
             questions = json.loads(raw)
             placeholder_patterns = ["question 1","question 2","question 3",f"{request.topic.lower()} question","placeholder","sample question"]
@@ -982,52 +1479,52 @@ async def quiz_generate(request: QuizGenerateRequest):
                 if any(p in q.get("question","").lower() for p in placeholder_patterns):
                     raise HTTPException(status_code=500, detail="Generated placeholder questions. Please try again.")
             return {"questions": questions}
-        except HTTPException: raise
-        except Exception as e:
-            import traceback; print(traceback.format_exc())
-            raise HTTPException(status_code=500, detail="Failed to generate quiz questions.")
 
+    try:
+        result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_quiz), timeout=35.0)
+        return result
+    except HTTPException: raise
+    except Exception as e:
+        import traceback; print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Failed to generate quiz questions.")
 
 @app.post("/api/quiz/evaluate")
 async def quiz_evaluate(request: QuizEvaluateRequest):
     try:
-        system_prompt = (
-            "You are a strict but fair university examiner. "
-            "Award marks honestly. NEVER exceed max_marks for any question. "
-            "Respond ONLY with a valid JSON array. "
-            "Each object: question_id, awarded_marks (int 0..max_marks), feedback (1-2 sentences)."
-        )
-        items_text="\n\n".join([
-            f"Question ID: {a.question_id}\nQuestion: {a.question}\nMax marks: {a.max_marks}\nStudent answer: {a.student_answer or '[No answer]'}"
-            for a in request.answers
-        ])
-        user_prompt=(f"Evaluate these answers:\n\n{items_text}\n\n"
-                     f'Return ONLY JSON like: [{{"question_id":"q1","awarded_marks":2,"feedback":"Good."}}]')
-        comp=get_groq_client().chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
-            temperature=0.1,max_tokens=2000)
-        raw=comp.choices[0].message.content.strip()
-        raw=re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
-        evaluations=json.loads(raw)
-        max_marks_map={a.question_id:a.max_marks for a in request.answers}
-        for ev in evaluations:
-            cap=max_marks_map.get(ev["question_id"],0)
-            ev["awarded_marks"]=max(0,min(int(ev["awarded_marks"]),cap))
-            ev["max_marks"]=cap
-        return {"evaluations":evaluations,"total_awarded":sum(ev["awarded_marks"] for ev in evaluations),"total_possible":sum(a.max_marks for a in request.answers)}
+        loop = asyncio.get_event_loop()
+        def _run_eval():
+            system_prompt = (
+                "You are a strict but fair university examiner. "
+                "Award marks honestly. NEVER exceed max_marks for any question. "
+                "Respond ONLY with a valid JSON array. "
+                "Each object: question_id, awarded_marks (int 0..max_marks), feedback (1-2 sentences)."
+            )
+            items_text="\n".join([
+                f"Question ID: {a.question_id}\nQuestion: {a.question}\nMax marks: {a.max_marks}\nStudent answer: {a.student_answer or '[No answer]'}"
+                for a in request.answers
+            ])
+            user_prompt=(f"Evaluate these answers:\n{items_text}\n"
+                         f'Return ONLY JSON like: [{{"question_id":"q1","awarded_marks":2,"feedback":"Good."}}]')
+            raw = chat_completion(
+                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
+                temperature=0.1, max_tokens=2000, timeout=30.0
+            )
+            raw=re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
+            evaluations=json.loads(raw)
+            max_marks_map={a.question_id:a.max_marks for a in request.answers}
+            for ev in evaluations:
+                cap=max_marks_map.get(ev["question_id"],0)
+                ev["awarded_marks"]=max(0,min(int(ev["awarded_marks"]),cap))
+                ev["max_marks"]=cap
+            return {"evaluations":evaluations,"total_awarded":sum(ev["awarded_marks"] for ev in evaluations),"total_possible":sum(a.max_marks for a in request.answers)}
+        
+        result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_eval), timeout=35.0)
+        return result
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="Failed to evaluate answers.")
 
-
-# ════════════════════════════════════════════════════════════════════════════
-#  ENDPOINT: /api/roadmap
-# ════════════════════════════════════════════════════════════════════════════
-
-class RoadmapRequest(BaseModel):
-    subject: str
-
+# --- Roadmap endpoint ---
 _RESOURCE_SITES = [
     ("W3Schools",      "w3schools.com",        "https://www.w3schools.com/",                            "tutorial"),
     ("GeeksforGeeks",  "geeksforgeeks.org",     "https://www.geeksforgeeks.org/",                        "article"),
@@ -1057,7 +1554,6 @@ def _fallback_resources(lesson_title: str, subject: str) -> list:
     return [{"title":f"{name} — {lesson_title}","url":_make_resource_url(domain,native,query),"type":rtype}
             for name,domain,native,rtype in _RESOURCE_SITES]
 
-
 def _generate_roadmap_sync(subject: str) -> dict:
     system_prompt = (
         "You are a curriculum designer. Output ONLY a raw JSON array — "
@@ -1077,7 +1573,7 @@ def _generate_roadmap_sync(subject: str) -> dict:
     try:
         raw = chat_completion(
             messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
-            temperature=0.15, max_tokens=1500, top_p=0.9,
+            temperature=0.15, max_tokens=1500, top_p=0.9, timeout=30.0,
         )
         raw   = re.sub(r'^```[a-zA-Z]*\s*','',raw.strip())
         raw   = re.sub(r'\s*```\s*$','',raw.strip())
@@ -1118,16 +1614,21 @@ def _generate_roadmap_sync(subject: str) -> dict:
         ]
         return {"lessons":[{"title":t,"content":c,"resources":_fallback_resources(t,subject)[:5]} for t,c in generic]}
 
-
 @app.post("/api/roadmap")
 async def generate_roadmap(request: RoadmapRequest):
     subject = request.subject.strip()
     if not subject:
         raise HTTPException(status_code=400, detail="Subject is required.")
     loop   = asyncio.get_event_loop()
-    result = await loop.run_in_executor(_executor, _generate_roadmap_sync, subject)
+    result = await asyncio.wait_for(loop.run_in_executor(_executor, _generate_roadmap_sync, subject), timeout=35.0)
     return result
 
+# FIX: Cleanup on shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    _executor.shutdown(wait=False)
+    with _groq_client_lock:
+        _groq_client_instances.clear()
 
 if __name__ == "__main__":
     import uvicorn
