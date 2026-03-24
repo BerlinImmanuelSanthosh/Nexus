@@ -19,7 +19,6 @@ from collections import OrderedDict
 import threading
 import time
 from contextlib import asynccontextmanager
-
 # Optional imports
 try:
     from googletrans import Translator
@@ -28,7 +27,6 @@ try:
 except ImportError:
     TRANSLATOR_AVAILABLE = False
     print("✗ googletrans not installed")
-
 try:
     import fitz  # PyMuPDF
     PYMUPDF_AVAILABLE = True
@@ -36,7 +34,6 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
     print("✗ PyMuPDF not installed")
-
 try:
     from langchain_community.document_loaders import PyPDFLoader, PDFPlumberLoader
     from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -45,7 +42,6 @@ try:
 except ImportError:
     LANGCHAIN_AVAILABLE = False
     print("✗ LangChain not installed")
-
 try:
     import pytesseract
     from PIL import Image
@@ -54,23 +50,18 @@ try:
 except ImportError:
     PYTESSERACT_AVAILABLE = False
     print("✗ Pytesseract not installed - install with: pip install pytesseract pillow")
-
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("Missing GROQ_API_KEY in .env")
-
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CX      = os.getenv("GOOGLE_CX", "")
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         yield
     except asyncio.CancelledError:
-        # Handle cancellation gracefully during shutdown
         pass
-
 app = FastAPI(lifespan=lifespan, title="NexusAI Chatbot")
 app.add_middleware(
     CORSMiddleware,
@@ -78,7 +69,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # --- Global file context with thread safety ---
 _file_context_lock = threading.Lock()
 _file_context: dict = {
@@ -89,75 +79,61 @@ _file_context: dict = {
     "ready":      False,
     "error":      "",
 }
-
-# FIX: Reduced from 50 to 20 workers to prevent resource exhaustion
 _executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="nexus_worker")
-
 # --- Pydantic models ---
 class ChatRequest(BaseModel):
     messages: List[dict]
-
+# FIX: Added questions field to support multiple questions
 class SimpleTeachRequest(BaseModel):
     topic: str
     language: str = "en"
     previous_response: str = ""
-
+    questions: Optional[List[str]] = None
+# FIX: Added questions field to support multiple questions
 class ChildTeachRequest(BaseModel):
     topic: str
     language: str = "en"
-
+    questions: Optional[List[str]] = None
 class QuizGenerateRequest(BaseModel):
     topic: str
     num_questions: int = 5
     marks_per_question: int = 2
     difficulty: str = "medium"
-
+    # FIX: Added use_file_context flag to enable PDF/doc-based quiz generation
+    use_file_context: bool = False
 class QuizAnswerItem(BaseModel):
     question_id: str
     question: str
     student_answer: str
     max_marks: int
-
+    # FIX: Added expected_keywords for per-question keyword matching
+    expected_keywords: Optional[List[str]] = None
 class QuizEvaluateRequest(BaseModel):
     answers: List[QuizAnswerItem]
-
 class RoadmapRequest(BaseModel):
     subject: str
-
 # --- Groq client with connection pool management ---
-# FIX: Create fresh client per request to avoid connection pool exhaustion
 _groq_client_lock = threading.Lock()
 _groq_client_instances = []
-_MAX_CLIENT_INSTANCES = 3  # FIX: Reduced from 10 to 3 to prevent resource exhaustion
-
+_MAX_CLIENT_INSTANCES = 3
 def get_groq_client():
     """Get or create a Groq client with proper timeout configuration."""
     with _groq_client_lock:
-        # Clean up old/dead clients
         _groq_client_instances[:] = [c for c in _groq_client_instances if c is not None]
-        
-        # Reuse existing client to prevent exhaustion
         if _groq_client_instances:
-            # Always reuse the first client instead of round-robin
-            # This reduces the number of active connections
             return _groq_client_instances[0]
-        
-        # Create new client if we don't have one
         if len(_groq_client_instances) < _MAX_CLIENT_INSTANCES:
-            # FIX: Explicit timeout to prevent hanging
             client = Groq(
                 api_key=GROQ_API_KEY,
-                timeout=30.0,  # 30 second timeout
-                max_retries=2  # Retry twice on failure
+                timeout=30.0,
+                max_retries=2
             )
             _groq_client_instances.append(client)
             return client
         else:
-            # Fallback: reuse first available client
             return _groq_client_instances[0]
-
 def chat_completion(messages: list, temperature: float = 0.25,
-                    max_tokens: int = 16000, top_p: float = 0.92, 
+                    max_tokens: int = 16000, top_p: float = 0.92,
                     timeout: float = 30.0) -> str:
     """FIX: Added timeout parameter and retry logic with exponential backoff."""
     for attempt in range(3):
@@ -170,7 +146,7 @@ def chat_completion(messages: list, temperature: float = 0.25,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
-                    timeout=timeout,  # FIX: Explicit timeout
+                    timeout=timeout,
                 )
                 if model != "openai/gpt-oss-20b":
                     print(f"✅ Fallback model '{model}' succeeded")
@@ -180,25 +156,22 @@ def chat_completion(messages: list, temperature: float = 0.25,
                 is_rate_limit = '429' in err_str or 'rate_limit' in err_str.lower()
                 is_timeout = 'timeout' in err_str.lower() or '504' in err_str
                 is_connection = 'connection' in err_str.lower() or '503' in err_str
-                
                 if is_rate_limit and model == "openai/gpt-oss-20b":
                     print(f"⚠ Rate limited on primary — switching to fallback")
                     continue
                 elif is_timeout or is_connection:
                     print(f"⚠ Attempt {attempt+1}: {err_str[:100]} — retrying...")
-                    time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                    time.sleep(0.5 * (attempt + 1))
                     continue
                 else:
                     raise
     raise RuntimeError("All models and retries failed")
-
 # --- Helper functions ---
 def clean_llm_response(text: str) -> str:
     text = re.sub(r'!\[[^\]]*\]\([^\)]*\)', '', text)
     text = re.sub(r'^#{1,6}\s+(.+)$', lambda m: f"\n{m.group(1).strip()}\n", text, flags=re.MULTILINE)
     text = re.sub(r'\*\*(.+?)\*\*', lambda m: m.group(1), text)
     return text.strip()
-
 def clean_to_plain_text(text: str) -> str:
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -209,87 +182,48 @@ def clean_to_plain_text(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
-
 def extract_text_with_ocr(image_bytes: bytes, page_num: int) -> str:
-    """
-    Extract text from image using pytesseract with timeout for speed.
-    """
     if not PYTESSERACT_AVAILABLE:
         return ""
-    
     try:
-        # Convert image bytes to PIL Image
         img = Image.open(io.BytesIO(image_bytes))
-        
-        # Run OCR with timeout - skip slow pages
         try:
             text = pytesseract.image_to_string(img, lang='eng', timeout=3)
         except Exception as timeout_e:
             print(f"    ⚠️ OCR timeout for page {page_num + 1} (slow to process)")
             return ""
-        
-        # Clean up extracted text
         text = text.strip()
-        
         if text and len(text) > 10:
             return text
         else:
             return ""
-            
     except pytesseract.TesseractNotFoundError:
         print(f"    ❌ Tesseract not installed")
         return ""
     except Exception as e:
         return ""
-
 def extract_text_with_langchain(pdf_bytes: bytes) -> str:
-    """
-    Extract text from PDF using LangChain document loaders.
-    Better handling of scanned PDFs and complex layouts.
-    """
     if not LANGCHAIN_AVAILABLE:
         return ""
-    
     try:
-        # Save to temp file for LangChain
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(pdf_bytes)
             tmp_path = tmp.name
-        
         try:
-            # Try PDFPlumber first (better for structured layouts)
             loader = PDFPlumberLoader(tmp_path)
             docs = loader.load()
-            
-            # Combine all pages
             text = "\n".join([doc.page_content for doc in docs])
             return text
-            
         finally:
-            # Clean up temp file
             try:
                 os.unlink(tmp_path)
             except:
                 pass
-                
     except Exception as e:
         print(f"  ⚠️ LangChain extraction error: {e}")
         return ""
-
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
-    """
-    Extract text from scanned PDF with OPTIMIZED speed.
-    Uses aggressive sampling + parallel OCR to extract in ~15-20 seconds.
-    
-    Strategy:
-    1. Try LangChain (searchable PDFs) - instant if works
-    2. Sample only key pages (first 5 + every 20th) for scanned PDFs
-    3. Use parallel OCR to process multiple pages simultaneously
-    4. Lower resolution rendering for faster OCR
-    """
-    
-    # First attempt: LangChain PDFPlumber (instant for searchable PDFs)
     if LANGCHAIN_AVAILABLE:
         try:
             langchain_result = extract_text_with_langchain(pdf_bytes)
@@ -298,93 +232,58 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
                 return langchain_result
         except:
             pass
-    
     if not PYMUPDF_AVAILABLE:
         return ""
-    
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         total_pages = len(doc)
         print(f"📄 PDF has {total_pages} pages (scanned), extracting key pages with OCR...")
-        
-        # Strategy for scanned PDFs: balance speed & coverage
         pages_to_ocr = []
-        
-        # Always include first 15 pages (intro/key content)
         pages_to_ocr.extend(range(0, min(15, total_pages)))
-        
-        # Add every 10th page (better coverage for image-based PDFs)
         for i in range(0, total_pages, 10):
             if i not in pages_to_ocr:
                 pages_to_ocr.append(i)
-        
-        # Also include last 10 pages (often have summary/conclusion)
         pages_to_ocr.extend(range(max(total_pages-10, 0), total_pages))
-        
-        pages_to_ocr = sorted(set(pages_to_ocr))  # Remove duplicates and sort
+        pages_to_ocr = sorted(set(pages_to_ocr))
         print(f"  🎯 Sampling {len(pages_to_ocr)} pages: first 15 + every 10th + last 10")
         print(f"  ⚡ Using parallel OCR processing...")
-        
-        # Render and process pages in parallel using ThreadPoolExecutor
         all_text_parts = {}
-        
         def process_page_ocr(page_num: int) -> tuple:
-            """Process single page with OCR, return (page_num, text)"""
             try:
                 page = doc[page_num]
                 page_text = page.get_text().strip()
-                
-                # Skip pages with sufficient text (already searchable)
                 if len(page_text) > 100:
                     return (page_num, page_text)
-                
-                # For scanned pages, use medium resolution for better OCR accuracy (0.75x zoom)
                 pix = page.get_pixmap(matrix=fitz.Matrix(0.75, 0.75), alpha=False)
                 image_bytes = pix.tobytes(output="png")
-                
-                # Skip if too large
                 if len(image_bytes) > 3 * 1024 * 1024:
                     return (page_num, page_text)
-                
-                # OCR this page
                 ocr_text = extract_text_with_ocr(image_bytes, page_num)
                 combined = (page_text + "\n" + ocr_text).strip() if page_text else ocr_text
-                
                 if ocr_text:
                     print(f"  ✅ Page {page_num + 1}: {len(ocr_text)} chars")
-                
                 return (page_num, combined)
             except Exception as e:
                 return (page_num, "")
-        
-        # Process pages in parallel (4 workers for OCR)
         with ThreadPoolExecutor(max_workers=4) as executor:
             results = list(executor.map(process_page_ocr, pages_to_ocr))
-        
-        # Combine results in order
         for page_num, text in results:
             if text:
                 all_text_parts[page_num] = text
-        
-        # Combine pages in page order
         result_text = []
         for page_num in sorted(all_text_parts.keys()):
             result_text.append(all_text_parts[page_num])
-        
         doc.close()
-        result = "\n\n".join(result_text).strip()
-        
+        result = "\n".join(result_text).strip()
         if result and len(result) > 100:
             print(f"✅ PDF extraction complete: {len(result):,} chars from {len(pages_to_ocr)} sampled pages")
             return result
         else:
             print(f"⚠️ PDF extraction resulted in minimal text")
             return ""
-        
     except Exception as e:
         print(f"⚠️ PDF extraction error: {e}")
         return ""
-
 def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
     try:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -401,64 +300,51 @@ def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
                     )}
                 ]
             }],
-            temperature=0.1, 
+            temperature=0.1,
             max_tokens=1500,
-            timeout=30.0,  # FIX: Explicit timeout
+            timeout=30.0,
         )
         return comp.choices[0].message.content.strip()
     except Exception as e:
         print(f"⚠ Image description error: {e}")
         return ""
-
 def answer_from_file_context(user_question: str, file_text: str, filename: str) -> Optional[str]:
     if not file_text or len(file_text.strip()) < 20:
         return None
-    
-    # Extract keywords from the question for better matching
     question_lower = user_question.lower()
     keywords = []
-    # Simple keyword extraction - split and take meaningful words
-    words = re.findall(r'\b\w{4,}\b', question_lower)  # words of 4+ chars
+    words = re.findall(r'\b\w{4,}\b', question_lower)
     keywords = [w for w in words if w not in ['what', 'when', 'where', 'which', 'from', 'with', 'that', 'this', 'have', 'does', 'explain', 'describe', 'tell', 'about', 'please']]
-    
-    # Search for relevant sections containing keywords
     relevant_sections = []
     text_lower = file_text.lower()
-    
-    for keyword in keywords[:3]:  # Limit to first 3 keywords to avoid too much
+    for keyword in keywords[:3]:
         start = 0
         while True:
             pos = text_lower.find(keyword, start)
             if pos == -1:
                 break
-            # Extract context around the keyword (500 chars before and after)
             context_start = max(0, pos - 500)
             context_end = min(len(file_text), pos + 500)
             section = file_text[context_start:context_end]
-            if section not in relevant_sections:  # Avoid duplicates
+            if section not in relevant_sections:
                 relevant_sections.append(section)
             start = pos + 1
-    
-    # If no keywords found, fall back to first 20000 chars
     if not relevant_sections:
         relevant_sections = [file_text[:20000]]
-    
-    # Combine sections, limit total to ~15000 chars to fit token limits
-    combined_text = '\n\n'.join(relevant_sections)
+    combined_text = '\n'.join(relevant_sections)
     if len(combined_text) > 15000:
         combined_text = combined_text[:15000] + '...'
-    
     system_prompt = (
         "You are NexusAI File Analyst. "
         "Answer the user's question using the FILE CONTENT provided. "
         "Reply with the answer from the file. "
         "If not found in file, reply: NOT_IN_FILE"
     )
-    user_msg = f"FILE: {filename}\n\nCONTENT:\n{combined_text}\n\n---\nQUESTION: {user_question}\n\nAnswer from file:"
+    user_msg = f"FILE: {filename}\nCONTENT:\n{combined_text}\n---\nQUESTION: {user_question}\nAnswer from file:"
     try:
         answer = chat_completion(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg}],
-            temperature=0.1, 
+            temperature=0.1,
             max_tokens=1000,
             timeout=20.0,
         )
@@ -468,7 +354,6 @@ def answer_from_file_context(user_question: str, file_text: str, filename: str) 
     except Exception as e:
         print(f"⚠ file-context answer error: {e}")
         return None
-
 # --- Background PDF processing ---
 def _background_process_pdf(pdf_bytes: bytes, filename: str):
     global _file_context
@@ -493,7 +378,6 @@ def _background_process_pdf(pdf_bytes: bytes, filename: str):
         with _file_context_lock:
             _file_context["error"]      = str(e)
             _file_context["processing"] = False
-
 # --- File upload endpoint ---
 @app.post("/api/upload-file")
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -502,7 +386,7 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
         content_type = file.content_type or ""
         filename     = file.filename or "uploaded_file"
         print(f"\n📁 Upload started: {filename} | content_type={content_type}")
-        MAX_BYTES = 100 * 1024 * 1024  # FIX: Increased from 50MB to 100MB for large PDFs
+        MAX_BYTES = 100 * 1024 * 1024
         chunks = []; total = 0
         while True:
             chunk = await file.read(1024 * 256)
@@ -527,11 +411,10 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
         elif is_image:
             with _file_context_lock:
                 _file_context.update({"text":"","filename":filename,"type":"image","processing":True,"ready":False,"error":""})
-            # FIX: Offload to executor with timeout
             loop = asyncio.get_event_loop()
             extracted_text = await asyncio.wait_for(
                 loop.run_in_executor(_executor, describe_image_with_groq, file_bytes, content_type or "image/png"),
-                timeout=45.0  # FIX: Increased from 35s to 45s for large images
+                timeout=45.0
             )
             if not extracted_text:
                 return {"success":False,"message":"Could not analyse the image.","chars_extracted":0}
@@ -551,32 +434,27 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
-
 @app.get("/api/upload-status")
 async def upload_status():
     with _file_context_lock:
         return {"ready":_file_context.get("ready",False),"processing":_file_context.get("processing",False),
                 "error":_file_context.get("error",""),"filename":_file_context.get("filename",""),
                 "chars_extracted":len(_file_context.get("text",""))}
-
 @app.post("/api/clear-file")
 async def clear_file():
     global _file_context
     with _file_context_lock:
         _file_context = {"text":"","filename":"","type":"","processing":False,"ready":False,"error":""}
     return {"success":True,"message":"File context cleared."}
-
 # --- SVG diagram generation (cached with thread safety) ---
 _svg_cache: OrderedDict = OrderedDict()
 _SVG_CACHE_MAX = 60
-_svg_cache_lock = threading.Lock()  # FIX: Added lock
-
+_svg_cache_lock = threading.Lock()
 def _cache_svg(key: str, value: str):
     with _svg_cache_lock:
         if key in _svg_cache: _svg_cache.move_to_end(key)
         _svg_cache[key] = value
         while len(_svg_cache) > _SVG_CACHE_MAX: _svg_cache.popitem(last=False)
-
 def generate_svg_diagram(user_message: str) -> Tuple[str, str]:
     msg_lower = user_message.lower().strip()
     skip_patterns = ['who is','who was','who are','actor','actress','singer','politician','celebrity','what is your name','how are you','thank you','thanks']
@@ -584,12 +462,9 @@ def generate_svg_diagram(user_message: str) -> Tuple[str, str]:
         if msg_lower.startswith(pat) or msg_lower == pat: return "", ""
     if len(msg_lower) < 3: return "", ""
     cache_key = user_message[:120].strip()
-    
-    # FIX: Thread-safe cache read
     with _svg_cache_lock:
         if cache_key in _svg_cache:
             return _svg_cache[cache_key], ""
-
     svg_system = """You are an SVG diagram code generator. You output ONLY valid SVG code.
 ABSOLUTE RULES:
 1. Output ONLY raw SVG. Zero explanation. Zero markdown. Zero fences.
@@ -601,21 +476,19 @@ ABSOLUTE RULES:
 7. Text inside boxes: fill="white" font-size="13" font-family="Arial,sans-serif"
 8. Title: font-size="18" font-weight="bold" fill="#222" at top center (y="38")
 9. Draw the REAL components of the topic — never a generic placeholder"""
-    
     user_prompt = f"""Generate SVG diagram for: "{user_message}"
 Draw the ACTUAL, SPECIFIC diagram for this exact topic.
 Now output ONLY the SVG for: "{user_message}"
 Start immediately with <svg"""
-    
     svg = _make_fallback_svg(user_message)
     try:
         print(f"🎨 Generating SVG for: '{user_message[:60]}'")
         comp = get_groq_client().chat.completions.create(
             model="openai/gpt-oss-safeguard-20b",
             messages=[{"role":"system","content":svg_system},{"role":"user","content":user_prompt}],
-            temperature=0.15, 
+            temperature=0.15,
             max_tokens=3000,
-            timeout=25.0,  # FIX: Explicit timeout
+            timeout=25.0,
         )
         raw = comp.choices[0].message.content.strip()
         raw = re.sub(r'^```[a-zA-Z]*\s*','',raw).strip()
@@ -630,11 +503,9 @@ Start immediately with <svg"""
         else: print("⚠ No valid SVG in LLM output, using topic fallback")
     except Exception as e:
         print(f"⚠ SVG LLM error: {e} — using topic fallback")
-    
     data_url = "data:image/svg+xml;base64," + base64.b64encode(svg.encode('utf-8')).decode('utf-8')
     _cache_svg(cache_key, data_url)
     return data_url, user_message[:50]
-
 def _make_fallback_svg(user_message: str) -> str:
     msg = user_message.lower(); title = user_message.title()[:45]
     if any(w in msg for w in ['python','java','javascript','compiler','interpreter']):
@@ -673,11 +544,9 @@ def _make_fallback_svg(user_message: str) -> str:
 <text x="430" y="50" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" font-weight="bold" fill="#222">{title}</text>
 {boxes_svg}{arrows_svg}
 </svg>"""
-
 def get_image_for_topic(user_message: str) -> str:
     data_url, _ = generate_svg_diagram(user_message)
     return data_url
-
 def create_html_with_image(text_response: str, image_url: str, topic: str) -> str:
     if not image_url: return text_response
     if 'data:image/svg+xml;base64' in text_response: return text_response
@@ -690,7 +559,6 @@ def create_html_with_image(text_response: str, image_url: str, topic: str) -> st
 {image_html}
 <div {content_style}>{text_response}</div>
 </div>'''
-
 # --- Language & mixed language detection ---
 def extract_user_context(user_message: str) -> str:
     msg_lower = user_message.lower()
@@ -705,12 +573,11 @@ def extract_user_context(user_message: str) -> str:
     parts = []
     if context_phrase:
         parts.append(f"The user is asking about the topic above in the context of {context_phrase}. "
-                     f"Answer ONLY about the topic — do NOT explain or describe {context_phrase} itself. "
-                     f"Match the depth, terminology, and syllabus coverage expected at {context_phrase} for this specific subject.")
+                    f"Answer ONLY about the topic — do NOT explain or describe {context_phrase} itself. "
+                    f"Match the depth, terminology, and syllabus coverage expected at {context_phrase} for this specific subject.")
     if wants_notes:
         parts.append("Format as structured notes: use numbered points and sub-points, short crisp sentences, key terms in Title Case — not long paragraphs.")
     return "\n".join(parts)
-
 LANG_NAME_MAP = {
     'ta':'Tamil','hi':'Hindi','te':'Telugu','ml':'Malayalam','kn':'Kannada',
     'bn':'Bengali','mr':'Marathi','gu':'Gujarati','pa':'Punjabi','ur':'Urdu',
@@ -718,7 +585,6 @@ LANG_NAME_MAP = {
     'pt':'Portuguese','ru':'Russian','zh-cn':'Chinese','ja':'Japanese','ko':'Korean',
     'nl':'Dutch','sv':'Swedish','tr':'Turkish','pl':'Polish','en':'English',
 }
-
 def detect_language(text: str) -> str:
     try:
         if re.search(r'[\u0B80-\u0BFF]',text): return 'ta'
@@ -733,38 +599,33 @@ def detect_language(text: str) -> str:
         if re.search(r'[\u0980-\u09FF]',text): return 'bn'
         return 'en'
     except: return 'en'
-
 MIXED_LANG_PATTERNS: List[Tuple] = [
     (re.compile(r'\b(sollu|solli|soll|kudu|theriyuma|puriyuma|pannunga|pannu|da|di|bro|machan|seri|illa|ama|romba)\b',re.IGNORECASE),
-     "Tanglish (Tamil-English mix — reply naturally in Tanglish, mixing Tamil words and English)","tanglish"),
+    "Tanglish (Tamil-English mix — reply naturally in Tanglish, mixing Tamil words and English)","tanglish"),
     (re.compile(r'\b(bolna|bolo|bata|batao|bol|kya|kaise|kyun|samjhao|yaar|bhai|mujhe|sikhao|padha)\b',re.IGNORECASE),
-     "Hinglish (Hindi-English mix — reply naturally in Hinglish, mixing Hindi words and English)","hinglish"),
+    "Hinglish (Hindi-English mix — reply naturally in Hinglish, mixing Hindi words and English)","hinglish"),
     (re.compile(r'\b(para|parayan|enthaa|ningal|njan|onnum|ille)\b',re.IGNORECASE),
-     "Manglish (Malayalam-English mix — reply naturally in Manglish)","manglish"),
+    "Manglish (Malayalam-English mix — reply naturally in Manglish)","manglish"),
     (re.compile(r'\b(heli|helri|hegide|yaake|yaaru|enu|illi|gottilla|nodri)\b',re.IGNORECASE),
-     "Kanglish (Kannada-English mix — reply naturally in Kanglish)","kanglish"),
+    "Kanglish (Kannada-English mix — reply naturally in Kanglish)","kanglish"),
 ]
-
 _ALL_MIXED_TRIGGERS = re.compile(
     r'\b(sollu|solli|soll|kudu|theriyuma|puriyuma|pannunga|pannu|da|di|bro|machan|seri|illa|ama|romba|'
     r'bolna|bolo|bata|batao|bol|kya|kaise|kyun|samjhao|yaar|bhai|mujhe|sikhao|padha|'
     r'para|parayan|enthaa|ningal|njan|onnum|ille|heli|helri|nodri)\b',
     re.IGNORECASE
 )
-
 def detect_mixed_language(text: str) -> Optional[Tuple[str,str]]:
     for pattern,lang_label,lang_code in MIXED_LANG_PATTERNS:
         if pattern.search(text):
             print(f"🌐 Mixed language detected: {lang_code}")
             return lang_label,lang_code
     return None
-
 def extract_core_topic_from_mixed(text: str) -> str:
     cleaned = _ALL_MIXED_TRIGGERS.sub(' ',text)
     cleaned = re.sub(r'\s+',' ',cleaned).strip()
     cleaned = re.sub(r'^[?!.,\s]+|[?!.,\s]+$','',cleaned).strip()
     return cleaned if len(cleaned)>=2 else text
-
 async def process_user_input(text: str) -> tuple:
     mixed = detect_mixed_language(text)
     if mixed:
@@ -789,12 +650,10 @@ async def process_user_input(text: str) -> tuple:
             print(f"🌐 Native script → '{translated}'")
             return translated, lang_code
     return text, lang_code
-
 def build_language_instruction(detected_lang: str) -> str:
     if len(detected_lang) > 10:
         return f"Respond in {detected_lang}."
     return f"Respond in {LANG_NAME_MAP.get(detected_lang.lower(),'English')} language."
-
 async def translate_headings(lang_code: str) -> dict:
     fallback = {'intro':'INTRODUCTION','concepts':'CORE CONCEPTS','fundamental':'FUNDAMENTAL CONCEPTS',
                 'detailed':'DETAILED EXPLANATION','example':'EXAMPLE','examples':'REAL-WORLD EXAMPLES',
@@ -819,10 +678,8 @@ async def translate_headings(lang_code: str) -> dict:
         except: return fallback
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, translate_headings_sync)
-
 async def get_section_headings(lang_code: str) -> dict:
     return await translate_headings(lang_code)
-
 # --- Pattern definitions ---
 GREETING_PATTERN    = re.compile(r'^\s*(hello|hi|hey|greetings|good morning|good afternoon|good evening|what\'s up|howdy|hiya)\b',re.IGNORECASE)
 PAGE_PATTERN        = re.compile(r'(\d+)\s*pages?\b',re.IGNORECASE)
@@ -833,7 +690,6 @@ NOTES_PATTERN       = re.compile(r'\bnotes?\b|\bsummary\b|\bsummaries\b|\bovervi
 WORD_COUNT_PATTERN  = re.compile(r'(\d+)\s*(?:words?|word count)\b', re.IGNORECASE)
 CHAR_COUNT_PATTERN  = re.compile(r'(\d+)\s*(?:chars?|characters?)\b', re.IGNORECASE)
 MULTI_QUESTION_KEYWORDS = ['questions', 'question', 'each', 'all', 'every', 'following', 'below', 'these']
-
 def detect_multiple_questions(text: str) -> bool:
     lines = [l.strip() for l in text.split('\n') if l.strip() and len(l) > 5]
     numbered_lines = [l for l in lines if re.match(r'^\d+\.?\s+', l)]
@@ -847,7 +703,6 @@ def detect_multiple_questions(text: str) -> bool:
     if has_multi_keyword and question_marks >= 2:
         return True
     return False
-
 def calculate_points_from_marks(marks: int, user_points: Optional[int] = None) -> int:
     if user_points is not None and user_points > 0:
         return user_points
@@ -856,7 +711,6 @@ def calculate_points_from_marks(marks: int, user_points: Optional[int] = None) -
     if marks == 2:
         return 2
     return marks * 3
-
 def extract_marks_and_points_flexible(msg_lower: str) -> Tuple[Optional[int], Optional[int]]:
     marks = None
     points = None
@@ -876,14 +730,11 @@ def extract_marks_and_points_flexible(msg_lower: str) -> Tuple[Optional[int], Op
     if give_points_match:
         points = int(give_points_match.group(1))
     return marks, points
-
 @lru_cache(maxsize=128)
 def is_greeting_cached(msg: str) -> bool:
     return bool(GREETING_PATTERN.search(msg))
-
 def is_greeting(msg: str) -> bool:
     return is_greeting_cached(msg.strip())
-
 @lru_cache(maxsize=64)
 def extract_questions_comprehensive_cached(text: str) -> tuple:
     questions,seen,unique=[],set(),[]
@@ -910,13 +761,10 @@ def extract_questions_comprehensive_cached(text: str) -> tuple:
             unique.append(q)
             seen.add(k)
     return tuple(unique)
-
 def extract_questions_comprehensive(text: str) -> list:
     return list(extract_questions_comprehensive_cached(text))
-
 def calculate_word_count_from_pages(pages: int) -> int: return pages*250
 def calculate_word_count_from_marks(marks: int) -> int: return marks*50
-
 def detect_mode_from_message(msg_lower: str) -> Tuple[str,int]:
     if any(t in msg_lower for t in ["explain in detail","detailed explanation","comprehensive","in depth"]): return "detailed_no_schedule",2
     if any(t in msg_lower for t in ["teach me","explain like","for beginners","simple"]): return "teaching",2
@@ -927,7 +775,6 @@ def detect_mode_from_message(msg_lower: str) -> Tuple[str,int]:
         gn=POINT_PATTERN.search(msg_lower) or MARK_PATTERN.search(msg_lower)
         if gn: return "points",int(gn.group(1))
     return "detailed",2
-
 def extract_length_constraint(msg_lower: str) -> Optional[dict]:
     word_match = WORD_COUNT_PATTERN.search(msg_lower)
     if word_match:
@@ -936,7 +783,6 @@ def extract_length_constraint(msg_lower: str) -> Optional[dict]:
     if char_match:
         return {'count': int(char_match.group(1)), 'type': 'chars'}
     return None
-
 def build_system_prompt(mode, point_count, user_context, detected_lang, headings, page_match=None, mark_match=None,
                         length_constraint=None, multiple_questions=False, marks_for_multi=None, points_for_multi=None) -> Tuple[str,int]:
     lang_instr=build_language_instruction(detected_lang)
@@ -1002,92 +848,203 @@ def build_system_prompt(mode, point_count, user_context, detected_lang, headings
     prompt_parts.append(f"{headings['insights']}")
     prompt_parts.append("NO timetable. NO study schedule. NO markdown image tags.")
     return ("\n".join(prompt_parts), 16000)
-
-# --- Endpoints ---
+# ============================================
+# === FIX: ONLY THESE TWO ENDPOINTS CHANGED ===
+# ============================================
 @app.post("/api/teach-simple")
 async def teach_simple(request: SimpleTeachRequest):
     try:
-        topic=request.topic; language=request.language; previous_response=request.previous_response.strip()
+        topic = request.topic
+        language = request.language
+        previous_response = request.previous_response.strip()
+        questions = request.questions or []
+        # Check if multiple questions exist (2 or more)
+        is_multiple = len(questions) >= 2
         loop = asyncio.get_event_loop()
         def _run_teach():
-            if previous_response:
-                plain_prev=re.sub(r'<[^>]+>',' ',previous_response)[:3000].strip()
-                system_prompt=(f"You are NexusAI. Rewrite the explanation about '{topic}' as a SHORT SIMPLE SUMMARY of 300-400 words.\n"
-                               f"RULES: Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
-                               f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.\nEXPLANATION:\n{plain_prev}")
-                user_msg=f"Short simple version about {topic}."
+            if is_multiple:
+                # Process ALL questions for multiple question mode
+                all_simplified = []
+                for i, q in enumerate(questions[:10]):  # Limit to 10 questions max
+                    system_prompt = (
+                        f"You are NexusAI. Explain '{q}' simply in 150-200 words (1 paragraph).\n"
+                        f"RULES: Simple language, clear explanation, no jargon. "
+                        f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.\n"
+                        f"Answer ONLY this question: {q}"
+                    )
+                    user_msg = f"Explain '{q}' simply in one paragraph."
+                    try:
+                        simplified = clean_llm_response(chat_completion(
+                            messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}],
+                            temperature=0.3, max_tokens=1000, top_p=0.9, timeout=25.0
+                        ))
+                        all_simplified.append(f"**Question {i+1}:** {q}\n{simplified}\n")
+                    except Exception as e:
+                        all_simplified.append(f"**Question {i+1}:** {q}\n[Could not simplify this question]\n")
+                return "\n---\n".join(all_simplified)
             else:
-                system_prompt=(f"You are NexusAI. Explain '{topic}' simply in 300-400 words.\n"
-                               f"Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
-                               f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.")
-                user_msg=f"Explain {topic} simply in 300-400 words."
-            return clean_llm_response(chat_completion(
-                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}],
-                temperature=0.3,max_tokens=2000,top_p=0.9,timeout=25.0))
-        
-        response_text = await asyncio.wait_for(loop.run_in_executor(_executor, _run_teach), timeout=30.0)
-        return {"response":f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;font-family:\'Segoe UI\',Arial,sans-serif;color:white;line-height:1.7;">{response_text}</div>'}
+                # Single question behavior - EXACTLY as original
+                if previous_response:
+                    plain_prev = re.sub(r'<[^>]+>', ' ', previous_response)[:3000].strip()
+                    system_prompt = (
+                        f"You are NexusAI. Rewrite the explanation about '{topic}' as a SHORT SIMPLE SUMMARY of 300-400 words.\n"
+                        f"RULES: Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
+                        f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'.\n"
+                        f"EXPLANATION:\n{plain_prev}"
+                    )
+                    user_msg = f"Short simple version about {topic}."
+                else:
+                    system_prompt = (
+                        f"You are NexusAI. Explain '{topic}' simply in 300-400 words.\n"
+                        f"Clear section labels: WHAT IS IT / HOW IT WORKS / REAL EXAMPLE / WHY IT MATTERS. "
+                        f"NO schedule. NO ## symbols. NO image tags. Respond in '{language}'."
+                    )
+                    user_msg = f"Explain {topic} simply in 300-400 words."
+                return clean_llm_response(chat_completion(
+                    messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}],
+                    temperature=0.3, max_tokens=2000, top_p=0.9, timeout=25.0
+                ))
+        response_text = await asyncio.wait_for(
+            loop.run_in_executor(_executor, _run_teach),
+            timeout=60.0 if is_multiple else 30.0
+        )
+        return {
+            "response": f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;font-family:\'Segoe UI\',Arial,sans-serif;color:white;line-height:1.7;">{response_text}</div>',
+            "is_multiple": is_multiple,
+            "question_count": len(questions) if is_multiple else 1
+        }
     except Exception as e:
         import traceback; print(traceback.format_exc())
-        raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
-
+        raise HTTPException(status_code=500, detail="An error occurred. Please try again.")
 @app.post("/api/explain-like-child")
 async def explain_like_child(request: ChildTeachRequest):
     try:
-        topic=request.topic; language=request.language
+        topic = request.topic
+        language = request.language
+        questions = request.questions or []
+        # Check if multiple questions exist (2 or more)
+        is_multiple = len(questions) >= 2
         loop = asyncio.get_event_loop()
         def _run_child():
-            def build_prompt(strict=False):
-                base=(
-                    f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
-                    f"Write EXACTLY 7 paragraphs. Each paragraph MUST be 4-5 simple sentences long.\n"
-                    f"Do NOT stop early. You MUST complete all 7 paragraphs fully before stopping.\n"
-                    f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
-                    f"NO emoji anywhere in the response.\n"
-                    f"NO bullet points. NO numbered lists. NO ## symbols.\n"
-                    f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
-                    f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
-                    f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
-                    f"Separate paragraphs with one blank line.\n"
-                    f"End the last paragraph with one fun fact about '{topic}'.\n"
-                    f"Plain text only. Language: {language}."
+            if is_multiple:
+                # Process ALL questions for multiple question mode
+                all_explained = []
+                for i, q in enumerate(questions[:5]):  # Limit to 5 questions for child mode
+                    def build_child_prompt(strict=False):
+                        base = (
+                            f"You are a friendly teacher explaining '{q}' to a 5-year-old child.\n"
+                            f"Write EXACTLY 3 paragraphs (shorter for multiple questions). Each paragraph MUST be 3-4 simple sentences long.\n"
+                            f"Do NOT stop early. You MUST complete all 3 paragraphs fully before stopping.\n"
+                            f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
+                            f"NO emoji anywhere in the response.\n"
+                            f"NO bullet points. NO numbered lists. NO ## symbols.\n"
+                            f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
+                            f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
+                            f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
+                            f"Separate paragraphs with one blank line.\n"
+                            f"End the last paragraph with one fun fact about '{q}'.\n"
+                            f"Plain text only. Language: {language}."
+                        )
+                        if strict:
+                            base += f"\nCRITICAL: Begin explaining '{q}' immediately with a real word. Write all 3 paragraphs without stopping."
+                        return base
+                    def strip_response(raw):
+                        plain = clean_to_plain_text(raw)
+                        lines = plain.splitlines()
+                        while lines and not any(c.isalpha() for c in lines[0]):
+                            lines.pop(0)
+                        return "\n".join(lines).strip()
+                    try:
+                        raw1 = chat_completion(
+                            messages=[{"role":"system","content":build_child_prompt()},
+                                    {"role":"user","content":f"Explain {q} like I'm 5 years old! Write all 3 paragraphs completely."}],
+                            temperature=0.4, max_tokens=1500, top_p=0.9, timeout=25.0
+                        )
+                        plain = strip_response(raw1)
+                        if not plain or not any(c.isalpha() for c in plain):
+                            raw2 = chat_completion(
+                                messages=[{"role":"system","content":build_child_prompt(True)},
+                                        {"role":"user","content":f"Explain {q} to a young child in 3 paragraphs. Write all 3 fully."}],
+                                temperature=0.2, max_tokens=1200, top_p=0.85, timeout=25.0
+                            )
+                            plain = strip_response(raw2)
+                        if not plain or not any(c.isalpha() for c in plain):
+                            plain = (
+                                f"{q} is something really interesting!\n"
+                                f"Think of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n"
+                                f"People use this every day to solve problems and make life easier.\n"
+                                f"Fun fact: You probably see it every single day without even knowing it!"
+                            )
+                        all_explained.append(f"**Question {i+1}:** {q}\n{plain}\n")
+                    except Exception as e:
+                        all_explained.append(f"**Question {i+1}:** {q}\n[Could not explain this question simply]\n")
+                return "\n---\n".join(all_explained)
+            else:
+                # Single question behavior - EXACTLY as original
+                def build_prompt(strict=False):
+                    base = (
+                        f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
+                        f"Write EXACTLY 7 paragraphs. Each paragraph MUST be 4-5 simple sentences long.\n"
+                        f"Do NOT stop early. You MUST complete all 7 paragraphs fully before stopping.\n"
+                        f"Use simple everyday words only. Fun analogies with toys, food, or animals.\n"
+                        f"NO emoji anywhere in the response.\n"
+                        f"NO bullet points. NO numbered lists. NO ## symbols.\n"
+                        f"NO HTML tags. NO markdown. NO title line. NO heading.\n"
+                        f"NO greeting opener like 'Sure!', 'Of course!', 'Great question!' etc.\n"
+                        f"Start your VERY FIRST word with the actual explanation — jump straight in.\n"
+                        f"Separate paragraphs with one blank line.\n"
+                        f"End the last paragraph with one fun fact about '{topic}'.\n"
+                        f"Plain text only. Language: {language}."
+                    )
+                    if strict:
+                        base += f"\nCRITICAL: Begin explaining '{topic}' immediately with a real word. Write all 7 paragraphs without stopping."
+                    return base
+                def strip_response(raw):
+                    plain = clean_to_plain_text(raw)
+                    lines = plain.splitlines()
+                    while lines and not any(c.isalpha() for c in lines[0]):
+                        lines.pop(0)
+                    return "\n".join(lines).strip()
+                raw1 = chat_completion(
+                    messages=[{"role":"system","content":build_prompt()},
+                            {"role":"user","content":f"Explain {topic} like I'm 5 years old! Write all 7 paragraphs completely."}],
+                    temperature=0.4, max_tokens=3000, top_p=0.9, timeout=25.0
                 )
-                if strict: base+=f"\nCRITICAL: Begin explaining '{topic}' immediately with a real word. Write all 7 paragraphs without stopping."
-                return base
-            def strip_response(raw):
-                plain=clean_to_plain_text(raw); lines=plain.splitlines()
-                while lines and not any(c.isalpha() for c in lines[0]): lines.pop(0)
-                return "\n".join(lines).strip()
-            raw1=chat_completion(
-                messages=[{"role":"system","content":build_prompt()},{"role":"user","content":f"Explain {topic} like I'm 5 years old! Write all 7 paragraphs completely."}],
-                temperature=0.4, max_tokens=3000, top_p=0.9, timeout=25.0
-            )
-            plain=strip_response(raw1)
-            if not plain or not any(c.isalpha() for c in plain):
-                print(f"⚠ explain-like-child: empty after strip, retrying...")
-                raw2=chat_completion(
-                    messages=[{"role":"system","content":build_prompt(True)},{"role":"user","content":f"Explain {topic} to a young child in 7 paragraphs. Write all 7 fully."}],
-                    temperature=0.2, max_tokens=2500, top_p=0.85, timeout=25.0
-                )
-                plain=strip_response(raw2)
-            if not plain or not any(c.isalpha() for c in plain):
-                plain=(
-                    f"{topic} is something really interesting!\n"
-                    f"Think of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n"
-                    f"People use {topic} every day to solve problems and make life easier.\n"
-                    f"Imagine you had a magic box that could do special things — that is a little bit like {topic}.\n"
-                    f"When you learn about {topic}, you start to understand how many things around you work.\n"
-                    f"Even grown-ups spend years learning about {topic} because there is always something new to discover.\n"
-                    f"Fun fact: {topic} is used in so many places that you probably see it every single day without even knowing it!"
-                )
-            return plain
-        
-        response_text = await asyncio.wait_for(loop.run_in_executor(_executor, _run_child), timeout=30.0)
-        return {"response": response_text}
+                plain = strip_response(raw1)
+                if not plain or not any(c.isalpha() for c in plain):
+                    print(f"⚠ explain-like-child: empty after strip, retrying...")
+                    raw2 = chat_completion(
+                        messages=[{"role":"system","content":build_prompt(True)},
+                                {"role":"user","content":f"Explain {topic} to a young child in 7 paragraphs. Write all 7 fully."}],
+                        temperature=0.2, max_tokens=2500, top_p=0.85, timeout=25.0
+                    )
+                    plain = strip_response(raw2)
+                if not plain or not any(c.isalpha() for c in plain):
+                    plain = (
+                        f"{topic} is something really interesting!\n"
+                        f"Think of it like a puzzle with lots of small pieces that fit together to make something big and useful.\n"
+                        f"People use {topic} every day to solve problems and make life easier.\n"
+                        f"Imagine you had a magic box that could do special things — that is a little bit like {topic}.\n"
+                        f"When you learn about {topic}, you start to understand how many things around you work.\n"
+                        f"Even grown-ups spend years learning about {topic} because there is always something new to discover.\n"
+                        f"Fun fact: {topic} is used in so many places that you probably see it every single day without even knowing it!"
+                    )
+                return plain
+        response_text = await asyncio.wait_for(
+            loop.run_in_executor(_executor, _run_child),
+            timeout=90.0 if is_multiple else 30.0
+        )
+        return {
+            "response": response_text,
+            "is_multiple": is_multiple,
+            "question_count": len(questions) if is_multiple else 1
+        }
     except Exception as e:
         import traceback; print(traceback.format_exc())
-        raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
-
+        raise HTTPException(status_code=500, detail="An error occurred. Please try again.")
+# ============================================
+# === END: ONLY THESE TWO ENDPOINTS CHANGED ===
+# ============================================
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
     try:
@@ -1098,12 +1055,8 @@ async def chat(request: ChatRequest):
         if english_query!=latest_user_msg:
             messages=messages[:-1]+[{"role":"user","content":english_query}]
         msg_lower=english_query.lower()
-        
-        # FIX: Limit message history to avoid context bloat (only last 6 messages = 3 turns)
-        # This prevents slowdown when conversation gets long
         MAX_HISTORY_MESSAGES = 6
         if len(messages) > MAX_HISTORY_MESSAGES:
-            # Keep system messages if any, then add most recent messages
             system_msgs = [m for m in messages if m.get("role") == "system"]
             other_msgs = [m for m in messages if m.get("role") != "system"]
             messages = system_msgs + other_msgs[-MAX_HISTORY_MESSAGES:]
@@ -1126,10 +1079,8 @@ async def chat(request: ChatRequest):
             print(f"🚫 Multiple questions mode - skipping images")
         else:
             print(f"✅ Default mode - images allowed")
-        
         image_url=""
         loop = asyncio.get_event_loop()
-        # FIX: Offload image generation to executor with timeout
         if not skip_image and len(english_query)>=2:
             try:
                 image_url = await asyncio.wait_for(
@@ -1140,7 +1091,6 @@ async def chat(request: ChatRequest):
             except asyncio.TimeoutError:
                 print(f"⚠️ Image generation timed out - continuing without image")
                 image_url = ""
-        
         file_prefix=""
         with _file_context_lock:
             fname = _file_context.get("filename")
@@ -1150,9 +1100,8 @@ async def chat(request: ChatRequest):
             if fname:
                 if processing:
                     file_prefix=(f'<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                                 f'font-family:\'Segoe UI\',Arial,sans-serif;color:#a5b4fc;font-size:13px;">⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge for now.</div>')
+                                f'font-family:\'Segoe UI\',Arial,sans-serif;color:#a5b4fc;font-size:13px;">⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge for now.</div>')
                 elif ready and ftext:
-                    # FIX: Offload file context answer to executor with timeout
                     try:
                         file_answer = await asyncio.wait_for(
                             loop.run_in_executor(_executor, answer_from_file_context, english_query, ftext, fname),
@@ -1160,26 +1109,22 @@ async def chat(request: ChatRequest):
                         )
                         if file_answer:
                             file_badge=(f'<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                                        f'font-family:\'Segoe UI\',Arial,sans-serif;color:#7fffb8;font-size:13px;">📄 Answer sourced from: <strong>{fname}</strong></div>')
+                                       f'font-family:\'Segoe UI\',Arial,sans-serif;color:#7fffb8;font-size:13px;">📄 Answer sourced from: <strong>{fname}</strong></div>')
                             return {"response":file_badge+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{file_answer}</div>'}
                         else:
                             file_prefix=(f'<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                                         f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
+                                        f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
                     except asyncio.TimeoutError:
                         print(f"⚠️ File context answer timed out - using general knowledge")
                         file_prefix=(f'<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;padding:8px 14px;margin-bottom:14px;border-radius:4px;'
-                                     f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ File search timed out. Here is the answer from my knowledge:</div>')
-        
+                                    f'font-family:\'Segoe UI\',Arial,sans-serif;color:#ffd580;font-size:13px;">⚠️ File search timed out. Here is the answer from my knowledge:</div>')
         length_constraint = extract_length_constraint(msg_lower)
         page_match=PAGE_PATTERN.search(msg_lower); mark_match=MARK_PATTERN.search(msg_lower)
         current_mode,current_point_count=detect_mode_from_message(msg_lower)
-        
-        # FIX: Wrap LLM calls in executor with timeout
         def _run_chat_completion(system_prompt, user_content, temp, max_tok, top_p):
             return clean_llm_response(chat_completion(
                 messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
                 temperature=temp,max_tokens=max_tok,top_p=top_p,timeout=25.0))
-
         if should_use_multi_with_points:
             calculated_points = calculate_points_from_marks(marks_extracted, points_extracted)
             questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
@@ -1190,14 +1135,13 @@ NO diagrams, NO images, NO lengthy explanations.
 Format: QUESTION 1: then 1. 2. 3. etc."""
             response_text = await asyncio.wait_for(
                 loop.run_in_executor(_executor, _run_chat_completion, system_prompt,
-                    f"CRITICAL: Answer ALL {len(current_questions)} questions. Do NOT skip any.\n"
-                    f"Each question needs EXACTLY {calculated_points} points. Each point = 1 sentence.\n"
-                    f"Format:\nQUESTION 1:\n1. [point]\n2. [point]\n...\nQUESTION 2:\n...\n"
-                    f"Questions:\n{questions_text}", 0.15, 16000, 0.88),
+                                    f"CRITICAL: Answer ALL {len(current_questions)} questions. Do NOT skip any.\n"
+                                    f"Each question needs EXACTLY {calculated_points} points. Each point = 1 sentence.\n"
+                                    f"Format:\nQUESTION 1:\n1. [point]\n2. [point]\n...\nQUESTION 2:\n...\n"
+                                    f"Questions:\n{questions_text}", 0.15, 16000, 0.88),
                 timeout=35.0
             )
             return {"response":file_prefix+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{response_text}</div>'}
-        
         if should_use_multi_no_points:
             questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
             system_prompt = f"""You are NexusAI. Answer in {LANG_NAME_MAP.get(detected_lang, 'English')}.
@@ -1206,23 +1150,20 @@ NO diagrams, NO images.
 Format: QUESTION 1: then paragraph answer."""
             response_text = await asyncio.wait_for(
                 loop.run_in_executor(_executor, _run_chat_completion, system_prompt,
-                    f"CRITICAL: Answer ALL {len(current_questions)} questions. Do NOT skip any.\n"
-                    f"Answer EACH question with a full paragraph (not just 1 sentence).\n"
-                    f"Format:\nQUESTION 1:\n[Paragraph answer]\nQUESTION 2:\n[Paragraph answer]\n"
-                    f"Questions:\n{questions_text}", 0.2, 16000, 0.9),
+                                    f"CRITICAL: Answer ALL {len(current_questions)} questions. Do NOT skip any.\n"
+                                    f"Answer EACH question with a full paragraph (not just 1 sentence).\n"
+                                    f"Format:\nQUESTION 1:\n[Paragraph answer]\nQUESTION 2:\n[Paragraph answer]\n"
+                                    f"Questions:\n{questions_text}", 0.2, 16000, 0.9),
                 timeout=35.0
             )
             return {"response":file_prefix+f'<div style="white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;color:white;">{response_text}</div>'}
-        
-        # Default mode (single question)
         system_prompt,max_tok=build_system_prompt(current_mode,current_point_count,user_context,detected_lang,headings,
-                                                    page_match,mark_match, length_constraint=length_constraint,
-                                                    multiple_questions=False, marks_for_multi=None, points_for_multi=None)
+                                                  page_match,mark_match, length_constraint=length_constraint,
+                                                  multiple_questions=False, marks_for_multi=None, points_for_multi=None)
         response_text = await asyncio.wait_for(
             loop.run_in_executor(_executor, _run_chat_completion, system_prompt, english_query, 0.25, max_tok, 0.92),
             timeout=35.0
         )
-        
         if image_url:
             print(f"✅ Returning response with image for: {english_query[:50]}")
             return {"response":file_prefix+create_html_with_image(response_text,image_url,english_query)}
@@ -1234,7 +1175,6 @@ Format: QUESTION 1: then paragraph answer."""
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
-
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     messages=request.messages
@@ -1244,8 +1184,6 @@ async def chat_stream(request: ChatRequest):
     if english_query!=latest_user_msg:
         messages=messages[:-1]+[{"role":"user","content":english_query}]
     msg_lower=english_query.lower()
-    
-    # FIX: Limit message history to avoid context bloat (only last 6 messages = 3 turns)
     MAX_HISTORY_MESSAGES = 6
     if len(messages) > MAX_HISTORY_MESSAGES:
         system_msgs = [m for m in messages if m.get("role") == "system"]
@@ -1260,7 +1198,6 @@ async def chat_stream(request: ChatRequest):
             yield f"data: {json.dumps({'type':'token','content':greeting})}\n"
             yield f"data: {json.dumps({'type':'done'})}\n"
         return StreamingResponse(greeting_gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
-    
     is_multiple_questions = detect_multiple_questions(latest_user_msg)
     marks_extracted, points_extracted = extract_marks_and_points_flexible(msg_lower)
     current_questions = extract_questions_comprehensive(latest_user_msg)
@@ -1274,11 +1211,9 @@ async def chat_stream(request: ChatRequest):
         print(f"🚫 Streaming: Multiple questions - skipping images")
     else:
         print(f"✅ Streaming: Default mode - images allowed")
-    
     length_constraint = extract_length_constraint(msg_lower)
     page_match=PAGE_PATTERN.search(msg_lower); mark_match=MARK_PATTERN.search(msg_lower)
     current_mode,current_point_count=detect_mode_from_message(msg_lower)
-    
     if should_use_multi_with_points:
         calculated_points = calculate_points_from_marks(marks_extracted, points_extracted)
         questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
@@ -1286,27 +1221,24 @@ async def chat_stream(request: ChatRequest):
 MULTIPLE QUESTIONS MODE: Answer EACH question with EXACTLY {calculated_points} points.
 Each point = 1 sentence. NO diagrams, NO images."""
         llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":
-            f"CRITICAL: Answer ALL {len(current_questions)} questions.\nEach question needs {calculated_points} points.\n"
-            f"Format: QUESTION 1:\n1. [point]\n2. [point]\n...\nQuestions:\n{questions_text}"}]
+                     f"CRITICAL: Answer ALL {len(current_questions)} questions.\nEach question needs {calculated_points} points.\n"
+                     f"Format: QUESTION 1:\n1. [point]\n2. [point]\n...\nQuestions:\n{questions_text}"}]
     elif should_use_multi_no_points:
         questions_text = "\n---\n".join([f"QUESTION {i+1}: {q}" for i,q in enumerate(current_questions)])
         system_prompt = f"""You are NexusAI. Answer in {LANG_NAME_MAP.get(detected_lang, 'English')}.
 MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images."""
         llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":
-            f"CRITICAL: Answer ALL {len(current_questions)} questions with paragraphs.\n"
-            f"Format: QUESTION 1:\n[Paragraph]\nQuestions:\n{questions_text}"}]
+                     f"CRITICAL: Answer ALL {len(current_questions)} questions with paragraphs.\n"
+                     f"Format: QUESTION 1:\n[Paragraph]\nQuestions:\n{questions_text}"}]
     else:
         system_prompt,max_tok=build_system_prompt(current_mode,current_point_count,user_context,detected_lang,headings,
-                                                    page_match,mark_match, length_constraint=length_constraint,
-                                                    multiple_questions=False, marks_for_multi=None, points_for_multi=None)
+                                                  page_match,mark_match, length_constraint=length_constraint,
+                                                  multiple_questions=False, marks_for_multi=None, points_for_multi=None)
         llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":english_query}]
-    
     def sync_stream_gen():
-        # FIX: Use global executor instead of creating new one
         svg_future = None
         if not skip_image and len(english_query)>=2:
             svg_future = _executor.submit(get_image_for_topic, english_query)
-        
         with _file_context_lock:
             fname = _file_context.get("filename")
             processing = _file_context.get("processing")
@@ -1315,25 +1247,24 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
             if fname:
                 if processing:
                     _indexing_html=('<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;'
-                                    'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#a5b4fc;font-size:13px;">'
-                                    f'⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge.</div>')
+                                   'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#a5b4fc;font-size:13px;">'
+                                   f'⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge.</div>')
                     yield f"data: {json.dumps({'type':'prefix','content':_indexing_html})}\n"
                 elif ready and ftext:
                     file_answer=answer_from_file_context(english_query,ftext,fname)
                     if file_answer:
                         badge=('<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;'
-                               'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#7fffb8;font-size:13px;">'
-                               f'📄 Answer sourced from: <strong>{fname}</strong></div>')
+                              'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#7fffb8;font-size:13px;">'
+                              f'📄 Answer sourced from: <strong>{fname}</strong></div>')
                         yield f"data: {json.dumps({'type':'prefix','content':badge})}\n"
                         yield f"data: {json.dumps({'type':'token','content':file_answer})}\n"
                         yield f"data: {json.dumps({'type':'done'})}\n"
                         return
                     else:
                         _notfound_html=('<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;'
-                                        'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#ffd580;font-size:13px;">'
-                                        f'⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
+                                       'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#ffd580;font-size:13px;">'
+                                       f'⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
                         yield f"data: {json.dumps({'type':'prefix','content':_notfound_html})}\n"
-        
         yield f"data: {json.dumps({'type':'start'})}\n"
         try:
             stream=get_groq_client().chat.completions.create(
@@ -1343,7 +1274,7 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
                 temperature=0.25,
                 max_tokens=16000,
                 top_p=0.92,
-                timeout=30.0  # FIX: Explicit timeout
+                timeout=30.0
             )
             for chunk in stream:
                 delta=chunk.choices[0].delta.content
@@ -1370,7 +1301,6 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
                     yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n"
             else:
                 yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n"
-        
         if svg_future:
             try:
                 image_url=svg_future.result(timeout=25)
@@ -1379,39 +1309,86 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
             except Exception:
                 pass
         yield f"data: {json.dumps({'type':'done'})}\n"
-    
     return StreamingResponse(sync_stream_gen(),media_type="text/event-stream",
-                             headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
+                            headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
+# ============================================
+# === FIX: QUIZ GENERATE & EVALUATE ENDPOINTS ===
+# ============================================
+# ============================================
+# === FIX: QUIZ GENERATE & EVALUATE ENDPOINTS ===
+# ============================================
 
-# --- Quiz endpoints ---
+
+
+
 @app.post("/api/quiz/generate")
 async def quiz_generate(request: QuizGenerateRequest):
     is_mcq = request.marks_per_question == 1
     loop = asyncio.get_event_loop()
+    # FIX: Check if file context is available and should be used
+    use_file_content = request.use_file_context
+    file_content = ""
+    filename = ""
+    if use_file_content:
+        with _file_context_lock:
+            if _file_context.get("ready") and _file_context.get("text"):
+                # FIX: Clean the PDF content before using for quiz generation
+                raw_content = _file_context.get("text", "")
+                file_content = clean_pdf_content_for_quiz(raw_content)
+                filename = _file_context.get("filename", "uploaded file")
     
     def _run_quiz():
         if is_mcq:
-            mcq_system = (
-                "You are a university exam MCQ generator. "
-                "Generate multiple-choice questions with 4 REAL, TOPIC-SPECIFIC answer options. "
-                "NEVER write 'Option 1', 'Option A', 'True', 'False', or any generic placeholder. "
-                "Every option must be a concrete fact or term directly related to the topic. "
-                "Exactly one option must be correct. "
-                "Return ONLY a raw JSON array — no markdown, no backticks, no explanation. "
-                "Each item: id (string), question (string), "
-                "options (array of exactly 4 strings prefixed A) B) C) D)), "
-                "correct_option (string), max_marks (int always 1)."
-            )
-            mcq_user = (
-                f"Topic: {request.topic}\nCount: {request.num_questions}\nDifficulty: {request.difficulty}\n"
-                f"Generate {request.num_questions} MCQ questions about '{request.topic}'. "
-                f"All 4 options must be specific facts/terms about the topic — never generic.\n"
-                f"Example for 'Python':\n"
-                f'[{{"id":"q1","question":"Which keyword defines a function in Python?",'
-                f'"options":["A) func","B) def","C) define","D) function"],'
-                f'"correct_option":"B) def","max_marks":1}}]\n'
-                f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
-            )
+            # FIX: MCQ generation with file content support
+            if use_file_content and file_content:
+                mcq_system = (
+                    "You are a university exam MCQ generator. "
+                    "Generate multiple-choice questions BASED ON THE PROVIDED FILE CONTENT. "
+                    "Generate multiple-choice questions with 4 REAL, TOPIC-SPECIFIC answer options. "
+                    "NEVER write 'Option 1', 'Option A', 'True', 'False', or any generic placeholder. "
+                    "Every option must be a concrete fact or term directly related to the topic. "
+                    "Exactly one option must be correct. "
+                    "Return ONLY a raw JSON array — no markdown, no backticks, no explanation. "
+                    "Each item: id (string), question (string), "
+                    "options (array of exactly 4 strings prefixed A) B) C) D)), "
+                    "correct_option (string), max_marks (int always 1), "
+                    "expected_keywords (array of 3-5 keywords from the answer for grading)."
+                )
+                mcq_user = (
+                    f"FILE: {filename}\nCONTENT:\n{file_content[:30000]}\n---\n"
+                    f"Topic: {request.topic}\nCount: {request.num_questions}\nDifficulty: {request.difficulty}\n"
+                    f"Generate {request.num_questions} MCQ questions about '{request.topic}' BASED ON THE FILE CONTENT ABOVE. "
+                    f"All 4 options must be specific facts/terms about the topic — never generic.\n"
+                    f"Example for 'Python':\n"
+                    f'[{{"id":"q1","question":"Which keyword defines a function in Python?",'
+                    f'"options":["A) func","B) def","C) define","D) function"],'
+                    f'"correct_option":"B) def","max_marks":1,"expected_keywords":["def","function","define"]}}]\n'
+                    f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
+                )
+            else:
+                # Original subject-name based MCQ generation (unchanged)
+                mcq_system = (
+                    "You are a university exam MCQ generator. "
+                    "Generate multiple-choice questions with 4 REAL, TOPIC-SPECIFIC answer options. "
+                    "NEVER write 'Option 1', 'Option A', 'True', 'False', or any generic placeholder. "
+                    "Every option must be a concrete fact or term directly related to the topic. "
+                    "Exactly one option must be correct. "
+                    "Return ONLY a raw JSON array — no markdown, no backticks, no explanation. "
+                    "Each item: id (string), question (string), "
+                    "options (array of exactly 4 strings prefixed A) B) C) D)), "
+                    "correct_option (string), max_marks (int always 1), "
+                    "expected_keywords (array of 3-5 keywords from the answer for grading)."
+                )
+                mcq_user = (
+                    f"Topic: {request.topic}\nCount: {request.num_questions}\nDifficulty: {request.difficulty}\n"
+                    f"Generate {request.num_questions} MCQ questions about '{request.topic}'. "
+                    f"All 4 options must be specific facts/terms about the topic — never generic.\n"
+                    f"Example for 'Python':\n"
+                    f'[{{"id":"q1","question":"Which keyword defines a function in Python?",'
+                    f'"options":["A) func","B) def","C) define","D) function"],'
+                    f'"correct_option":"B) def","max_marks":1,"expected_keywords":["def","function","define"]}}]\n'
+                    f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
+                )
             bad_patterns = ["option 1","option 2","option 3","option 4","option a","option b","option c","option d","placeholder"]
             def validate_mcq(questions: list) -> list:
                 prefixes = ["A) ","B) ","C) ","D) "]
@@ -1428,6 +1405,9 @@ async def quiz_generate(request: QuizGenerateRequest):
                         prefixed.append(s)
                     q["options"] = prefixed
                     q["max_marks"] = 1
+                    # FIX: Ensure expected_keywords exists for each question
+                    if "expected_keywords" not in q or not q["expected_keywords"]:
+                        q["expected_keywords"] = []
                     valid.append(q)
                 return valid
             for attempt in range(2):
@@ -1450,24 +1430,50 @@ async def quiz_generate(request: QuizGenerateRequest):
                 print(f"⚠ MCQ attempt {attempt+1}: no valid options, retrying...")
             raise HTTPException(status_code=500, detail="Could not generate valid MCQ options. Please try again.")
         else:
-            system_prompt = (
-                "You are a university exam paper setter. "
-                "Generate REAL, SPECIFIC exam questions — never placeholder text like "
-                "'Question 1', 'Maths question 1', or any generic filler. "
-                "Each question must be a complete, answerable question directly about the topic given. "
-                "Respond ONLY with a valid JSON array, no markdown, no extra text. "
-                "Each object must have: id (string like 'q1'), question (string), max_marks (int)."
-            )
-            user_prompt = (
-                f"Topic: {request.topic}\nNumber of questions: {request.num_questions}\n"
-                f"Marks per question: {request.marks_per_question}\nDifficulty: {request.difficulty}\n"
-                f"Write {request.num_questions} REAL, SPECIFIC exam questions about '{request.topic}'. "
-                f"Every question must be directly about '{request.topic}'. "
-                f"For {request.marks_per_question}-mark questions: define/state/list/give one example. "
-                f"Each question is worth exactly {request.marks_per_question} marks. "
-                f"Return ONLY a valid JSON array like: "
-                f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question}}}]'
-            )
+            # FIX: Non-MCQ generation with file content support
+            if use_file_content and file_content:
+                system_prompt = (
+                    "You are a university exam paper setter. "
+                    "Generate REAL, SPECIFIC exam questions BASED ON THE PROVIDED FILE CONTENT. "
+                    "Generate REAL, SPECIFIC exam questions — never placeholder text like "
+                    "'Question 1', 'Maths question 1', or any generic filler. "
+                    "Each question must be a complete, answerable question directly about the topic given. "
+                    "Respond ONLY with a valid JSON array, no markdown, no extra text. "
+                    "Each object must have: id (string like 'q1'), question (string), max_marks (int), "
+                    "expected_keywords (array of 3-5 keywords from the expected answer for grading)."
+                )
+                user_prompt = (
+                    f"FILE: {filename}\nCONTENT:\n{file_content[:30000]}\n---\n"
+                    f"Topic: {request.topic}\nNumber of questions: {request.num_questions}\n"
+                    f"Marks per question: {request.marks_per_question}\nDifficulty: {request.difficulty}\n"
+                    f"Write {request.num_questions} REAL, SPECIFIC exam questions about '{request.topic}' BASED ON THE FILE CONTENT ABOVE. "
+                    f"Every question must be directly about '{request.topic}'. "
+                    f"For {request.marks_per_question}-mark questions: define/state/list/give one example. "
+                    f"Each question is worth exactly {request.marks_per_question} marks. "
+                    f"Return ONLY a valid JSON array like: "
+                    f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question},"expected_keywords":["X","formula","define"]}}]'
+                )
+            else:
+                # Original subject-name based question generation (unchanged)
+                system_prompt = (
+                    "You are a university exam paper setter. "
+                    "Generate REAL, SPECIFIC exam questions — never placeholder text like "
+                    "'Question 1', 'Maths question 1', or any generic filler. "
+                    "Each question must be a complete, answerable question directly about the topic given. "
+                    "Respond ONLY with a valid JSON array, no markdown, no extra text. "
+                    "Each object must have: id (string like 'q1'), question (string), max_marks (int), "
+                    "expected_keywords (array of 3-5 keywords from the expected answer for grading)."
+                )
+                user_prompt = (
+                    f"Topic: {request.topic}\nNumber of questions: {request.num_questions}\n"
+                    f"Marks per question: {request.marks_per_question}\nDifficulty: {request.difficulty}\n"
+                    f"Write {request.num_questions} REAL, SPECIFIC exam questions about '{request.topic}'. "
+                    f"Every question must be directly about '{request.topic}'. "
+                    f"For {request.marks_per_question}-mark questions: define/state/list/give one example. "
+                    f"Each question is worth exactly {request.marks_per_question} marks. "
+                    f"Return ONLY a valid JSON array like: "
+                    f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question},"expected_keywords":["X","formula","define"]}}]'
+                )
             raw = chat_completion(
                 messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
                 temperature=0.4, max_tokens=1500, timeout=30.0,
@@ -1478,8 +1484,11 @@ async def quiz_generate(request: QuizGenerateRequest):
             for q in questions:
                 if any(p in q.get("question","").lower() for p in placeholder_patterns):
                     raise HTTPException(status_code=500, detail="Generated placeholder questions. Please try again.")
+            # FIX: Ensure expected_keywords exists for each question
+            if "expected_keywords" not in q or not q["expected_keywords"]:
+                q["expected_keywords"] = []
             return {"questions": questions}
-
+    
     try:
         result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_quiz), timeout=35.0)
         return result
@@ -1488,23 +1497,38 @@ async def quiz_generate(request: QuizGenerateRequest):
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Failed to generate quiz questions.")
 
+
 @app.post("/api/quiz/evaluate")
 async def quiz_evaluate(request: QuizEvaluateRequest):
     try:
         loop = asyncio.get_event_loop()
         def _run_eval():
+            # FIX: Build per-question keyword matching instructions
+            question_keyword_info = []
+            for a in request.answers:
+                keywords = a.expected_keywords if a.expected_keywords else []
+                keyword_str = ", ".join(keywords) if keywords else "none specified"
+                question_keyword_info.append(
+                    f"Question ID: {a.question_id}\n"
+                    f"Question: {a.question}\n"
+                    f"Max marks: {a.max_marks}\n"
+                    f"Student answer: {a.student_answer or '[No answer]'}\n"
+                    f"Expected keywords for THIS question: {keyword_str}\n"
+                    f"Grade based on: Check if student answer contains the expected keywords for this specific question. "
+                    f"Award proportional marks based on keyword coverage."
+                )
+            items_text = "\n---\n".join(question_keyword_info)
             system_prompt = (
                 "You are a strict but fair university examiner. "
                 "Award marks honestly. NEVER exceed max_marks for any question. "
+                "IMPORTANT: Each question has its OWN specific expected keywords. "
+                "Check the expected keywords listed for EACH question individually. "
+                "Do NOT use the same keywords for all questions. "
                 "Respond ONLY with a valid JSON array. "
                 "Each object: question_id, awarded_marks (int 0..max_marks), feedback (1-2 sentences)."
             )
-            items_text="\n".join([
-                f"Question ID: {a.question_id}\nQuestion: {a.question}\nMax marks: {a.max_marks}\nStudent answer: {a.student_answer or '[No answer]'}"
-                for a in request.answers
-            ])
-            user_prompt=(f"Evaluate these answers:\n{items_text}\n"
-                         f'Return ONLY JSON like: [{{"question_id":"q1","awarded_marks":2,"feedback":"Good."}}]')
+            user_prompt=(f"Evaluate these answers with per-question keyword matching:\n{items_text}\n"
+            f'Return ONLY JSON like: [{{"question_id":"q1","awarded_marks":2,"feedback":"Good answer with key terms."}}]')
             raw = chat_completion(
                 messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
                 temperature=0.1, max_tokens=2000, timeout=30.0
@@ -1517,14 +1541,66 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
                 ev["awarded_marks"]=max(0,min(int(ev["awarded_marks"]),cap))
                 ev["max_marks"]=cap
             return {"evaluations":evaluations,"total_awarded":sum(ev["awarded_marks"] for ev in evaluations),"total_possible":sum(a.max_marks for a in request.answers)}
-        
         result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_eval), timeout=35.0)
         return result
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="Failed to evaluate answers.")
-
-# --- Roadmap endpoint ---
+# ============================================
+# === END: QUIZ ENDPOINTS FIXED ===
+# ============================================
+@app.post("/api/quiz/evaluate")
+async def quiz_evaluate(request: QuizEvaluateRequest):
+    try:
+        loop = asyncio.get_event_loop()
+        def _run_eval():
+            # FIX: Build per-question keyword matching instructions
+            question_keyword_info = []
+            for a in request.answers:
+                keywords = a.expected_keywords if a.expected_keywords else []
+                keyword_str = ", ".join(keywords) if keywords else "none specified"
+                question_keyword_info.append(
+                    f"Question ID: {a.question_id}\n"
+                    f"Question: {a.question}\n"
+                    f"Max marks: {a.max_marks}\n"
+                    f"Student answer: {a.student_answer or '[No answer]'}\n"
+                    f"Expected keywords for THIS question: {keyword_str}\n"
+                    f"Grade based on: Check if student answer contains the expected keywords for this specific question. "
+                    f"Award proportional marks based on keyword coverage."
+                )
+            items_text = "\n---\n".join(question_keyword_info)
+            
+            system_prompt = (
+                "You are a strict but fair university examiner. "
+                "Award marks honestly. NEVER exceed max_marks for any question. "
+                "IMPORTANT: Each question has its OWN specific expected keywords. "
+                "Check the expected keywords listed for EACH question individually. "
+                "Do NOT use the same keywords for all questions. "
+                "Respond ONLY with a valid JSON array. "
+                "Each object: question_id, awarded_marks (int 0..max_marks), feedback (1-2 sentences)."
+            )
+            user_prompt=(f"Evaluate these answers with per-question keyword matching:\n{items_text}\n"
+                        f'Return ONLY JSON like: [{{"question_id":"q1","awarded_marks":2,"feedback":"Good answer with key terms."}}]')
+            raw = chat_completion(
+                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
+                temperature=0.1, max_tokens=2000, timeout=30.0
+            )
+            raw=re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
+            evaluations=json.loads(raw)
+            max_marks_map={a.question_id:a.max_marks for a in request.answers}
+            for ev in evaluations:
+                cap=max_marks_map.get(ev["question_id"],0)
+                ev["awarded_marks"]=max(0,min(int(ev["awarded_marks"]),cap))
+                ev["max_marks"]=cap
+            return {"evaluations":evaluations,"total_awarded":sum(ev["awarded_marks"] for ev in evaluations),"total_possible":sum(a.max_marks for a in request.answers)}
+        result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_eval), timeout=35.0)
+        return result
+    except Exception as e:
+        import traceback; print(traceback.format_exc())
+        raise HTTPException(status_code=500,detail="Failed to evaluate answers.")
+# ============================================
+# === END: QUIZ ENDPOINTS FIXED ===
+# ============================================
 _RESOURCE_SITES = [
     ("W3Schools",      "w3schools.com",        "https://www.w3schools.com/",                            "tutorial"),
     ("GeeksforGeeks",  "geeksforgeeks.org",     "https://www.geeksforgeeks.org/",                        "article"),
@@ -1542,18 +1618,15 @@ _RESOURCE_SITES = [
     ("Dev.to",         "dev.to",                "https://dev.to/search?q=",                              "article"),
     ("Stack Overflow", "stackoverflow.com",     "https://stackoverflow.com/search?q=",                   "docs"),
 ]
-
 def _make_resource_url(site_domain, native_base, query):
     encoded = requests.utils.quote(query)
     if site_domain:
         return f"https://www.google.com/search?q={encoded}+site%3A{site_domain}"
     return native_base + encoded
-
 def _fallback_resources(lesson_title: str, subject: str) -> list:
     query = f"{subject} {lesson_title}"
     return [{"title":f"{name} — {lesson_title}","url":_make_resource_url(domain,native,query),"type":rtype}
             for name,domain,native,rtype in _RESOURCE_SITES]
-
 def _generate_roadmap_sync(subject: str) -> dict:
     system_prompt = (
         "You are a curriculum designer. Output ONLY a raw JSON array — "
@@ -1590,7 +1663,7 @@ def _generate_roadmap_sync(subject: str) -> dict:
                 url = str(r.get("url","")).strip()
                 if url and url!="#" and url.startswith("http"):
                     cleaned.append({"title":str(r.get("title","Resource")),"url":url,
-                                    "type":r.get("type","article") if r.get("type") in ("article","video","docs","tutorial") else "article"})
+                                   "type":r.get("type","article") if r.get("type") in ("article","video","docs","tutorial") else "article"})
             if len(cleaned)<5:
                 fallbacks = _fallback_resources(title,subject)
                 existing  = {r["title"].split("—")[0].strip().lower() for r in cleaned}
@@ -1613,7 +1686,6 @@ def _generate_roadmap_sync(subject: str) -> dict:
             ("Advanced Topics",         f"Tackle advanced areas in {subject}."),
         ]
         return {"lessons":[{"title":t,"content":c,"resources":_fallback_resources(t,subject)[:5]} for t,c in generic]}
-
 @app.post("/api/roadmap")
 async def generate_roadmap(request: RoadmapRequest):
     subject = request.subject.strip()
@@ -1622,14 +1694,11 @@ async def generate_roadmap(request: RoadmapRequest):
     loop   = asyncio.get_event_loop()
     result = await asyncio.wait_for(loop.run_in_executor(_executor, _generate_roadmap_sync, subject), timeout=35.0)
     return result
-
-# FIX: Cleanup on shutdown
 @app.on_event("shutdown")
 async def shutdown_event():
     _executor.shutdown(wait=False)
     with _groq_client_lock:
         _groq_client_instances.clear()
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

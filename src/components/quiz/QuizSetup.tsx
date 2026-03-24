@@ -68,56 +68,61 @@ const QuizSetup = ({ onStart, onBack, chatQuestion, isLoading }: QuizSetupProps)
 
     setIsExtracting(true);
     try {
-      let extractedText = '';
+      // Send directly to the backend — it handles extraction + cleaning
+      const formData = new FormData();
+      formData.append('file', file);
 
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        const pages: string[] = [];
-        for (let i = 1; i <= Math.min(pdf.numPages, 50); i++) {
-          const page = await pdf.getPage(i);
-          const textContent = await page.getTextContent();
-          const pageText = textContent.items
-            .map((item: any) => item.str)
-            .join(' ');
-          pages.push(pageText);
-        }
-        extractedText = pages.join('\n\n');
-      } else {
-        extractedText = await file.text();
-      }
+      const res = await fetch('http://localhost:8000/api/upload-file', {
+        method: 'POST',
+        body: formData,
+      });
 
-      const cleaned = extractedText.replace(/\s+/g, ' ').trim().slice(0, 8000);
-      if (cleaned.length < 10) {
-        toast.error('Could not extract meaningful text from the file');
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const data = await res.json();
+
+      if (!data.success) {
+        toast.error(data.message || 'Could not process file');
         return;
       }
-      setAttachedFile({ name: file.name, text: cleaned });
+
+      // Store only the filename — quiz generation will use use_file_context: true
+      setAttachedFile({ name: file.name, text: '__use_backend_context__' });
+
       if (!subject.trim()) {
         setSubject(file.name.replace(/\.[^.]+$/, '').slice(0, 60));
       }
-      toast.success(`Extracted text from ${file.name}`);
+
+      if (data.processing) {
+        toast.info(`File uploaded — indexing in background. Start the quiz in a moment.`);
+      } else {
+        toast.success(`File "${file.name}" ready for quiz generation`);
+      }
     } catch (err) {
-      console.error('File extraction error:', err);
-      toast.error('Failed to read file');
+      console.error('File upload error:', err);
+      toast.error('Failed to upload file to server');
     } finally {
       setIsExtracting(false);
     }
   };
 
-  // ── handleStart ────────────────────────────────────────────────────────────
-  // Just calls onStart — the parent calls startQuiz which calls generateQuestions,
-  // and generateQuestions now hits /api/quiz/generate correctly.
-  // No duplicate generateQuiz call needed here anymore.
   const handleStart = () => {
+    // If a file is attached, subject is the topic label and
+    // useQuiz will use use_file_context: true on the backend
     const effectiveSubject = chatQuestion
       ? autoSubject
-      : (attachedFile ? attachedFile.text : subject);
+      : subject.trim() || (attachedFile ? attachedFile.name.replace(/\.[^.]+$/, '') : '');
 
     if (!effectiveSubject.trim()) return;
     if (timeHours === 0 && timeMinutes === 0) return;
 
-    onStart({ subject: effectiveSubject, questions, timeHours, timeMinutes, mode });
+    onStart({
+      subject: effectiveSubject,
+      questions,
+      timeHours,
+      timeMinutes,
+      mode,
+      useFileContext: !!attachedFile, // <-- new flag
+    });
   };
 
   return (
