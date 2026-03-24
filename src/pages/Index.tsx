@@ -157,6 +157,7 @@ const Index = () => {
             onStart={handleStartQuiz}
             onBack={() => { setCurrentView('chat'); setChatQuestion(null); }}
             chatQuestion={chatQuestion}
+            isLoading={isQuizGenerating}
           />
         );
 

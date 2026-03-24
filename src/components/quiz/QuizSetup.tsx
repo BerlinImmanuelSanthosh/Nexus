@@ -14,9 +14,10 @@ interface QuizSetupProps {
   onBack: () => void;
   /** When launched from chat, the AI message becomes the question — subject is auto-filled */
   chatQuestion?: string | null;
+  isLoading?: boolean;
 }
 
-const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
+const QuizSetup = ({ onStart, onBack, chatQuestion, isLoading }: QuizSetupProps) => {
   const autoSubject = chatQuestion
     ? chatQuestion.slice(0, 60).replace(/\n/g, ' ').trim()
     : '';
@@ -343,12 +344,20 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         <Button
           onClick={handleStart}
           disabled={
+            isLoading ||
             (chatQuestion ? false : (!subject.trim() && !attachedFile)) ||
             (timeHours === 0 && timeMinutes === 0)
           }
           className="w-full h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
         >
-          Confirm & Start Test
+          {isLoading ? (
+            <span className="flex items-center gap-2">
+              <div className="h-4 w-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" />
+              Generating Questions...
+            </span>
+          ) : (
+            'Confirm & Start Test'
+          )}
         </Button>
       </div>
     </div>

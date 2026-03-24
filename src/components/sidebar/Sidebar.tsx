@@ -5,7 +5,7 @@ import { QuizResult } from '@/types/quiz';
 import { Roadmap } from '@/types/roadmap';
 import ConversationItem from './ConversationItem';
 import { cn } from '@/lib/utils';
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useState, useEffect } from 'react';
 
 type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance' | 'roadmap-setup' | 'roadmap';
 
