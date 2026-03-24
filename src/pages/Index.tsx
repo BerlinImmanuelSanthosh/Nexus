@@ -53,6 +53,7 @@ const Index = () => {
     startQuiz,
     updateAnswer,
     evaluateQuiz,
+    setCurrentQuiz,
   } = useQuiz();
 
   const {
