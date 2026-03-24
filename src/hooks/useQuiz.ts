@@ -94,12 +94,15 @@ export function useQuiz() {
 
       for (const qConfig of config.questions) {
         try {
+          // For or-choice, generate 2x questions (a and b variants)
+          const numToGenerate = qConfig.orChoice ? qConfig.count * 2 : qConfig.count;
+          
           const res = await fetch(`${API}/api/quiz/generate`, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               topic:              config.subject,
-              num_questions:      qConfig.count,
+              num_questions:      numToGenerate,
               marks_per_question: qConfig.marks,
               difficulty:         'medium',
             }),
@@ -113,38 +116,66 @@ export function useQuiz() {
 
           const isMcq = qConfig.marks === 1;
 
-          for (const q of parsed.slice(0, qConfig.count)) {
-            if (isMcq) {
-              // Validate that backend returned real options
-              const opts: string[] = q.options ?? [];
-              const hasRealOptions =
-                opts.length >= 4 &&
-                !opts.some((o: string) =>
-                  /option\s*[1-4abcd]/i.test(o) ||   // catches "Option 1", "Option A"
-                  /^(true|false)$/i.test(o.replace(/^[A-D]\)\s*/i, '').trim())  // catches bare True/False
-                );
-
-              if (!hasRealOptions) {
-                console.warn('Backend returned bad options, will retry question:', q);
-                // Don't push bad options — skip and let the catch block regenerate
-                continue;
+          if (qConfig.orChoice && !isMcq) {
+            // Group questions in pairs as a/b choices
+            for (let i = 0; i < Math.min(parsed.length, numToGenerate); i += 2) {
+              const qA = parsed[i];
+              const qB = parsed[i + 1];
+              if (qA) {
+                allQuestions.push({
+                  id:       (qA.id ?? generateId()),
+                  question: qA.question,
+                  marks:    qA.max_marks ?? qConfig.marks,
+                  type:     'written',
+                  options:  undefined,
+                  orGroup:  Math.floor(i / 2) + 1,
+                  orLabel:  'a',
+                } as any);
               }
+              if (qB) {
+                allQuestions.push({
+                  id:       (qB.id ?? generateId()),
+                  question: qB.question,
+                  marks:    qB.max_marks ?? qConfig.marks,
+                  type:     'written',
+                  options:  undefined,
+                  orGroup:  Math.floor(i / 2) + 1,
+                  orLabel:  'b',
+                } as any);
+              }
+            }
+          } else {
+            for (const q of parsed.slice(0, qConfig.count)) {
+              if (isMcq) {
+                const opts: string[] = q.options ?? [];
+                const hasRealOptions =
+                  opts.length >= 4 &&
+                  !opts.some((o: string) =>
+                    /option\s*[1-4abcd]/i.test(o) ||
+                    /^(true|false)$/i.test(o.replace(/^[A-D]\)\s*/i, '').trim())
+                  );
 
-              allQuestions.push({
-                id:       q.id ?? generateId(),
-                question: q.question,
-                marks:    q.max_marks ?? 1,
-                type:     'mcq',
-                options:  opts.slice(0, 4),
-              });
-            } else {
-              allQuestions.push({
-                id:       q.id ?? generateId(),
-                question: q.question,
-                marks:    q.max_marks ?? qConfig.marks,
-                type:     'written',
-                options:  undefined,
-              });
+                if (!hasRealOptions) {
+                  console.warn('Backend returned bad options, will retry question:', q);
+                  continue;
+                }
+
+                allQuestions.push({
+                  id:       q.id ?? generateId(),
+                  question: q.question,
+                  marks:    q.max_marks ?? 1,
+                  type:     'mcq',
+                  options:  opts.slice(0, 4),
+                });
+              } else {
+                allQuestions.push({
+                  id:       q.id ?? generateId(),
+                  question: q.question,
+                  marks:    q.max_marks ?? qConfig.marks,
+                  type:     'written',
+                  options:  undefined,
+                });
+              }
             }
           }
 
