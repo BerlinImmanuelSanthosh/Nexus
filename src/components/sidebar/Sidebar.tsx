@@ -42,6 +42,17 @@ const Sidebar = memo(({
 }: SidebarProps) => {
   const [historyTab, setHistoryTab] = useState<'chats' | 'quizzes' | 'roadmaps'>('chats');
 
+  // Auto-switch history tab based on current view/mode
+  useEffect(() => {
+    if (currentView === 'quiz-setup' || currentView === 'quiz' || currentView === 'quiz-results') {
+      setHistoryTab('quizzes');
+    } else if (currentView === 'roadmap-setup' || currentView === 'roadmap') {
+      setHistoryTab('roadmaps');
+    } else if (currentView === 'chat') {
+      setHistoryTab('chats');
+    }
+  }, [currentView]);
+
   const handleOverlayClick = useCallback(() => {
     onToggle();
   }, [onToggle]);
