@@ -56,6 +56,8 @@ export interface QuizQuestion {
   marks: number;
   options?: string[]; // For 1-mark MCQ questions
   type: 'mcq' | 'written';
+  orGroup?: number;  // Questions with same orGroup are a/b choices
+  orLabel?: 'a' | 'b'; // Which choice variant this is
 }
 
 export interface QuizAnswer {
