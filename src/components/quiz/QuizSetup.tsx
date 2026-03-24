@@ -14,9 +14,10 @@ interface QuizSetupProps {
   onBack: () => void;
   /** When launched from chat, the AI message becomes the question — subject is auto-filled */
   chatQuestion?: string | null;
+  isLoading?: boolean;
 }
 
-const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
+const QuizSetup = ({ onStart, onBack, chatQuestion, isLoading }: QuizSetupProps) => {
   const autoSubject = chatQuestion
     ? chatQuestion.slice(0, 60).replace(/\n/g, ' ').trim()
     : '';
@@ -41,7 +42,7 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
     setQuestions(prev => prev.filter((_, i) => i !== index));
   };
 
-  const updateQuestion = (index: number, field: keyof QuestionConfig, value: number) => {
+  const updateQuestion = (index: number, field: keyof QuestionConfig, value: number | boolean) => {
     setQuestions(prev => prev.map((q, i) => i === index ? { ...q, [field]: value } : q));
   };
 
@@ -249,6 +250,17 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
                       ? '4 choices (MCQ)'
                       : `Written answer (min ${q.marks * 10} words)`}
                   </p>
+                  {q.marks >= 2 && (
+                    <label className="flex items-center gap-2 mt-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={q.orChoice || false}
+                        onChange={e => updateQuestion(i, 'orChoice', e.target.checked)}
+                        className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                      />
+                      <span className="text-xs text-muted-foreground">Or Choice (1a/1b, 2a/2b — answer only one)</span>
+                    </label>
+                  )}
                 </div>
                 {questions.length > 1 && (
                   <Button
@@ -343,12 +355,20 @@ const QuizSetup = ({ onStart, onBack, chatQuestion }: QuizSetupProps) => {
         <Button
           onClick={handleStart}
           disabled={
+            isLoading ||
             (chatQuestion ? false : (!subject.trim() && !attachedFile)) ||
             (timeHours === 0 && timeMinutes === 0)
           }
           className="w-full h-12 text-base font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90"
         >
-          Confirm & Start Test
+          {isLoading ? (
+            <span className="flex items-center gap-2">
+              <div className="h-4 w-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" />
+              Generating Questions...
+            </span>
+          ) : (
+            'Confirm & Start Test'
+          )}
         </Button>
       </div>
     </div>

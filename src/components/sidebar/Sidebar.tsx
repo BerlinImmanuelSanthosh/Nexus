@@ -5,7 +5,7 @@ import { QuizResult } from '@/types/quiz';
 import { Roadmap } from '@/types/roadmap';
 import ConversationItem from './ConversationItem';
 import { cn } from '@/lib/utils';
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useState, useEffect } from 'react';
 
 type ViewType = 'chat' | 'quiz-setup' | 'quiz' | 'quiz-results' | 'performance' | 'roadmap-setup' | 'roadmap';
 
@@ -41,6 +41,17 @@ const Sidebar = memo(({
   onSelectRoadmap,
 }: SidebarProps) => {
   const [historyTab, setHistoryTab] = useState<'chats' | 'quizzes' | 'roadmaps'>('chats');
+
+  // Auto-switch history tab based on current view/mode
+  useEffect(() => {
+    if (currentView === 'quiz-setup' || currentView === 'quiz' || currentView === 'quiz-results') {
+      setHistoryTab('quizzes');
+    } else if (currentView === 'roadmap-setup' || currentView === 'roadmap') {
+      setHistoryTab('roadmaps');
+    } else if (currentView === 'chat') {
+      setHistoryTab('chats');
+    }
+  }, [currentView]);
 
   const handleOverlayClick = useCallback(() => {
     onToggle();

@@ -94,24 +94,24 @@ const ChatMessages = memo(({ messages, isTyping, uploadedFile, onClearFile, onTa
           ... file status code ...
         )} */}
 
-        {messages.map((message, index) => (
-          <MessageBubble
-            key={message.id}
-            message={message}
-            // Pass the preceding user message as the subject source for roadmap.
-            // For every assistant reply, messages[index - 1] is always the user
-            // question that triggered it — so "explain Python" → "Python",
-            // not "Introduction" from the first line of the AI response.
-            userQuestion={
-              message.role === 'assistant'
-                ? messages[index - 1]?.content
-                : undefined
-            }
-            onExpand={handleExpand}
-            onTakeTest={onTakeTest}
-            onRoadmap={onRoadmap}
-          />
-        ))}
+        {messages.map((message, index) => {
+          const isLastAssistant = message.role === 'assistant' && index === messages.length - 1;
+          return (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              userQuestion={
+                message.role === 'assistant'
+                  ? messages[index - 1]?.content
+                  : undefined
+              }
+              onExpand={handleExpand}
+              onTakeTest={onTakeTest}
+              onRoadmap={onRoadmap}
+              isStreaming={isLastAssistant && isTyping}
+            />
+          );
+        })}
 
         {/* Streaming cursor shown while typing and last message is still being built */}
         {isTyping && messages.length > 0 && messages[messages.length - 1]?.role === 'assistant' && (

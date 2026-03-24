@@ -10,6 +10,7 @@ interface MessageBubbleProps {
   onExpand?: (message: Message) => void;
   onTakeTest?: (question: string) => void;
   onRoadmap?: (subject: string) => void;
+  isStreaming?: boolean;
 }
 
 const CLICK_HINT_TEXTS = [
@@ -18,7 +19,7 @@ const CLICK_HINT_TEXTS = [
   '🔍 Click to dive deeper',
 ];
 
-const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoadmap }: MessageBubbleProps) => {
+const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoadmap, isStreaming }: MessageBubbleProps) => {
   const isUser = message.role === 'user';
   const [copied, setCopied]               = useState(false);
   const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
@@ -303,11 +304,11 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
 
           <div
             className={cn(
-              "max-w-[70%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
+              "rounded-2xl leading-relaxed",
               "transition-all duration-200 hover:shadow-lg hover:shadow-primary/5",
               isUser
-                ? "bg-chat-user text-foreground rounded-br-md cursor-default"
-                : "bg-chat-ai text-foreground rounded-bl-md",
+                ? "max-w-[75%] px-5 py-3.5 text-base bg-chat-user text-foreground rounded-br-md cursor-default"
+                : "max-w-[70%] px-4 py-3 text-sm bg-chat-ai text-foreground rounded-bl-md",
               !isGreeting && !isUser ? "cursor-pointer" : "cursor-default",
             )}
             onClick={handleBubbleClick}
@@ -371,20 +372,20 @@ const MessageBubble = memo(({ message, userQuestion, onExpand, onTakeTest, onRoa
               : <><Copy className="h-3 w-3" /><span>Copy</span></>}
           </button>
 
-          {!isUser && !isGreeting && onTakeTest && (
+          {!isUser && !isGreeting && !isStreaming && onTakeTest && (
             <button onClick={handleTakeTest} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors py-1">
               <ClipboardList className="h-3 w-3" /><span>Take Test</span>
             </button>
           )}
 
-          {!isUser && !isGreeting && (
+          {!isUser && !isGreeting && !isStreaming && (
             <button onClick={handleConvertToPdf} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors py-1">
               <FileDown className="h-3 w-3" /><span>Save as PDF</span>
             </button>
           )}
         </div>
 
-        {!isUser && !isGreeting && onRoadmap && (
+        {!isUser && !isGreeting && !isStreaming && onRoadmap && (
           <div className={cn("px-12", "self-start")}>
             <button
               onClick={handleRoadmap}

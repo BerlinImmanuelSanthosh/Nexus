@@ -103,6 +103,7 @@ const Index = () => {
   }, [clearFile]);
 
   const handleStartQuiz = useCallback(async (config: QuizConfig) => {
+    // Stay on quiz-setup while generating (loading shown on button)
     await startQuiz(config, chatQuestion ?? undefined);
     setChatQuestion(null);
     setCurrentView('quiz');
@@ -157,6 +158,7 @@ const Index = () => {
             onStart={handleStartQuiz}
             onBack={() => { setCurrentView('chat'); setChatQuestion(null); }}
             chatQuestion={chatQuestion}
+            isLoading={isQuizGenerating}
           />
         );
 
