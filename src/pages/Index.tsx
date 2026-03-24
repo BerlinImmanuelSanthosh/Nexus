@@ -53,6 +53,7 @@ const Index = () => {
     startQuiz,
     updateAnswer,
     evaluateQuiz,
+    setCurrentQuiz,
   } = useQuiz();
 
   const {
@@ -181,6 +182,10 @@ const Index = () => {
               answers={currentQuiz.answers}
               onUpdateAnswer={updateAnswer}
               onSubmit={handleSubmitQuiz}
+              onRetryQuiz={() => {
+                setCurrentQuiz(null);
+                setCurrentView('quiz-setup');
+              }}
             />
           );
         }

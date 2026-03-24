@@ -22,6 +22,7 @@ interface QuizPageProps {
   answers: QuizAnswer[];
   onUpdateAnswer: (questionId: string, answer: Partial<QuizAnswer>) => void;
   onSubmit: () => void;
+  onRetryQuiz?: () => void;
 }
 
 const MOTIVATION_MESSAGES = [
@@ -37,7 +38,7 @@ const MOTIVATION_MESSAGES = [
   "Hard work pays off — keep it up! 🏆",
 ];
 
-const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: QuizPageProps) => {
+const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit, onRetryQuiz }: QuizPageProps) => {
   const totalSeconds = config.timeHours * 3600 + config.timeMinutes * 60;
   const [expandedQuestion, setExpandedQuestion] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -146,8 +147,8 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
       <QuizResults
         result={result}
         onRetry={() => {
-          reset();       // clears result in the hook
-          onSubmit();    // tells parent to go back to setup
+          reset();
+          if (onRetryQuiz) onRetryQuiz();
         }}
       />
     );
