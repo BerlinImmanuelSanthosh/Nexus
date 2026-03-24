@@ -43,6 +43,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
   const [showConfirm, setShowConfirm] = useState(false);
   const [motivationMsg, setMotivationMsg] = useState('');
   const [showMotivation, setShowMotivation] = useState(false);
+  const [selectedOrChoice, setSelectedOrChoice] = useState<Record<number, 'a' | 'b'>>({}); // orGroup -> selected choice
 
   // One ref per written question to export canvas+text
   const editorRefs = useRef<Record<string, AnswerEditorRef | null>>({});
@@ -171,30 +172,82 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
           const answer = answers.find(a => a.questionId === q.id);
           const isExpanded = expandedQuestion === q.id;
           const hasAnswer = q.type === 'mcq' ? !!answer?.selectedOption : !!(answer?.textAnswer || answer?.canvasData);
+          
+          // Or-choice logic
+          const isOrChoice = !!q.orGroup;
+          const orSelected = q.orGroup ? selectedOrChoice[q.orGroup] : undefined;
+          const isDisabledByOrChoice = isOrChoice && orSelected && orSelected !== q.orLabel;
+          
+          // Build question label
+          let qLabel = `Q${index + 1}`;
+          if (isOrChoice && q.orLabel) {
+            // Find the display number for this or-group
+            const groupQuestions = questions.filter(qq => qq.orGroup === q.orGroup);
+            const groupIndex = questions.indexOf(groupQuestions[0]);
+            const displayNum = Math.floor(groupIndex / 2) + 1 + (questions.filter((qq, i) => i < groupIndex && !qq.orGroup).length);
+            qLabel = `Q${q.orGroup}${q.orLabel}`;
+          }
 
           return (
-            <div key={q.id} className="rounded-xl border border-border bg-secondary/30 overflow-hidden transition-all">
+            <div key={q.id} className={cn(
+              "rounded-xl border overflow-hidden transition-all",
+              isDisabledByOrChoice 
+                ? "border-border/50 bg-secondary/10 opacity-50" 
+                : "border-border bg-secondary/30"
+            )}>
+              {/* Or-choice selector */}
+              {isOrChoice && q.orLabel === 'a' && (
+                <div className="px-4 pt-3 pb-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="font-medium text-primary">OR Choice</span>
+                  <span>— Answer only one: {qLabel} or Q{q.orGroup}b</span>
+                </div>
+              )}
+              
               {/* Question header */}
               <button
-                onClick={() => q.type === 'written' ? toggleQuestion(q.id) : undefined}
+                onClick={() => {
+                  if (isDisabledByOrChoice) return;
+                  if (q.type === 'written') toggleQuestion(q.id);
+                }}
                 className={cn(
                   "flex w-full items-center justify-between p-4 text-left",
-                  q.type === 'written' && "cursor-pointer hover:bg-secondary/50"
+                  isDisabledByOrChoice ? "cursor-not-allowed" : q.type === 'written' && "cursor-pointer hover:bg-secondary/50"
                 )}
               >
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-primary/20 text-primary">
-                      Q{index + 1}
+                      {qLabel}
                     </span>
                     <span className="text-xs text-muted-foreground">{q.marks} mark{q.marks > 1 ? 's' : ''}</span>
                     {hasAnswer && (
                       <span className="text-xs text-primary">✓ Answered</span>
                     )}
+                    {isOrChoice && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (q.orGroup && q.orLabel) {
+                            setSelectedOrChoice(prev => ({
+                              ...prev,
+                              [q.orGroup!]: q.orLabel!,
+                            }));
+                          }
+                        }}
+                        className={cn(
+                          "text-xs px-2 py-0.5 rounded-full border transition-all",
+                          orSelected === q.orLabel
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "border-border text-muted-foreground hover:border-primary/50"
+                        )}
+                      >
+                        {orSelected === q.orLabel ? '✓ Selected' : 'Choose this'}
+                      </button>
+                    )}
                   </div>
                   <p className="text-sm text-foreground">{q.question}</p>
                 </div>
-                {q.type === 'written' && (
+                {q.type === 'written' && !isDisabledByOrChoice && (
                   isExpanded
                     ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
                     : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -202,7 +255,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
               </button>
 
               {/* MCQ Options */}
-              {q.type === 'mcq' && q.options && (
+              {q.type === 'mcq' && q.options && !isDisabledByOrChoice && (
                 <div className="px-4 pb-4 space-y-2">
                   {q.options.map((option, optIdx) => (
                     <button
@@ -222,7 +275,7 @@ const QuizPage = ({ config, questions, answers, onUpdateAnswer, onSubmit }: Quiz
               )}
 
               {/* Written answer - expandable with smooth transition */}
-              {q.type === 'written' && (
+              {q.type === 'written' && !isDisabledByOrChoice && (
                 <div
                   className={cn(
                     "overflow-hidden transition-all duration-300 ease-in-out",
