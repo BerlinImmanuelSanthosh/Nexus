@@ -47,6 +47,7 @@ export interface QuizConfig {
 export interface QuestionConfig {
   marks: number;
   count: number;
+  orChoice?: boolean; // For 2+ mark questions: each question has a/b choice options
 }
 
 export interface QuizQuestion {
