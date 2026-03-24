@@ -181,6 +181,10 @@ const Index = () => {
               answers={currentQuiz.answers}
               onUpdateAnswer={updateAnswer}
               onSubmit={handleSubmitQuiz}
+              onRetryQuiz={() => {
+                setCurrentQuiz(null);
+                setCurrentView('quiz-setup');
+              }}
             />
           );
         }

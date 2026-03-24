@@ -172,7 +172,7 @@ const MessageExpandModal = memo(({ message, onClose }: MessageExpandModalProps) 
       className="fixed inset-0 z-50 bg-background/70 backdrop-blur-md animate-fade-in"
       onClick={onClose}
     >
-      <div className="absolute inset-0 overflow-y-auto flex justify-center py-16 px-6">
+      <div className="absolute inset-0 flex justify-center py-16 px-6">
         {/* Main content box */}
         <div
           className="flex-1 max-w-3xl rounded-2xl px-8 py-6 text-base leading-relaxed shadow-2xl border border-border/50 animate-scale-in max-h-[85vh] overflow-y-auto bg-chat-ai text-foreground"
@@ -215,9 +215,9 @@ const MessageExpandModal = memo(({ message, onClose }: MessageExpandModalProps) 
           )}
         </div>
 
-        {/* Robot panel */}
+        {/* Robot panel - fixed position so it stays visible during scroll */}
         <div
-          className="ml-6 flex flex-col items-center gap-3 sticky top-8 self-start"
+          className="fixed right-8 top-20 flex flex-col items-center gap-3 z-[51]"
           onClick={(e) => e.stopPropagation()}
         >
           <RobotFace />
