@@ -255,7 +255,7 @@ const QuizSetup = ({ onStart, onBack, chatQuestion, isLoading }: QuizSetupProps)
                       <input
                         type="checkbox"
                         checked={q.orChoice || false}
-                        onChange={e => updateQuestion(i, 'orChoice' as any, e.target.checked ? 1 : 0)}
+                        onChange={e => updateQuestion(i, 'orChoice', e.target.checked)}
                         className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
                       />
                       <span className="text-xs text-muted-foreground">Or Choice (1a/1b, 2a/2b — answer only one)</span>
