@@ -42,7 +42,7 @@ const QuizSetup = ({ onStart, onBack, chatQuestion, isLoading }: QuizSetupProps)
     setQuestions(prev => prev.filter((_, i) => i !== index));
   };
 
-  const updateQuestion = (index: number, field: keyof QuestionConfig, value: number) => {
+  const updateQuestion = (index: number, field: keyof QuestionConfig, value: number | boolean) => {
     setQuestions(prev => prev.map((q, i) => i === index ? { ...q, [field]: value } : q));
   };
 
