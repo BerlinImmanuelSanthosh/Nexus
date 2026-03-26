@@ -19,6 +19,7 @@ from collections import OrderedDict
 import threading
 import time
 from contextlib import asynccontextmanager
+
 # Optional imports
 try:
     from googletrans import Translator
@@ -27,6 +28,7 @@ try:
 except ImportError:
     TRANSLATOR_AVAILABLE = False
     print("✗ googletrans not installed")
+
 try:
     import fitz  # PyMuPDF
     PYMUPDF_AVAILABLE = True
@@ -34,6 +36,7 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
     print("✗ PyMuPDF not installed")
+
 try:
     from langchain_community.document_loaders import PyPDFLoader, PDFPlumberLoader
     from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -42,6 +45,7 @@ try:
 except ImportError:
     LANGCHAIN_AVAILABLE = False
     print("✗ LangChain not installed")
+
 try:
     import pytesseract
     from PIL import Image
@@ -50,18 +54,22 @@ try:
 except ImportError:
     PYTESSERACT_AVAILABLE = False
     print("✗ Pytesseract not installed - install with: pip install pytesseract pillow")
+
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("Missing GROQ_API_KEY in .env")
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CX      = os.getenv("GOOGLE_CX", "")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         yield
     except asyncio.CancelledError:
         pass
+
 app = FastAPI(lifespan=lifespan, title="NexusAI Chatbot")
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +77,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # --- Global file context with thread safety ---
 _file_context_lock = threading.Lock()
 _file_context: dict = {
@@ -79,43 +88,49 @@ _file_context: dict = {
     "ready":      False,
     "error":      "",
 }
+
 _executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="nexus_worker")
+
 # --- Pydantic models ---
 class ChatRequest(BaseModel):
     messages: List[dict]
-# FIX: Added questions field to support multiple questions
+
 class SimpleTeachRequest(BaseModel):
     topic: str
     language: str = "en"
     previous_response: str = ""
     questions: Optional[List[str]] = None
-# FIX: Added questions field to support multiple questions
+
 class ChildTeachRequest(BaseModel):
     topic: str
     language: str = "en"
     questions: Optional[List[str]] = None
+
 class QuizGenerateRequest(BaseModel):
     topic: str
     num_questions: int = 5
     marks_per_question: int = 2
     difficulty: str = "medium"
-    # FIX: Added use_file_context flag to enable PDF/doc-based quiz generation
     use_file_context: bool = False
+
 class QuizAnswerItem(BaseModel):
     question_id: str
     question: str
     student_answer: str
     max_marks: int
-    # FIX: Added expected_keywords for per-question keyword matching
     expected_keywords: Optional[List[str]] = None
+
 class QuizEvaluateRequest(BaseModel):
     answers: List[QuizAnswerItem]
+
 class RoadmapRequest(BaseModel):
     subject: str
+
 # --- Groq client with connection pool management ---
 _groq_client_lock = threading.Lock()
 _groq_client_instances = []
 _MAX_CLIENT_INSTANCES = 3
+
 def get_groq_client():
     """Get or create a Groq client with proper timeout configuration."""
     with _groq_client_lock:
@@ -132,6 +147,7 @@ def get_groq_client():
             return client
         else:
             return _groq_client_instances[0]
+
 def chat_completion(messages: list, temperature: float = 0.25,
                     max_tokens: int = 16000, top_p: float = 0.92,
                     timeout: float = 30.0) -> str:
@@ -166,12 +182,14 @@ def chat_completion(messages: list, temperature: float = 0.25,
                 else:
                     raise
     raise RuntimeError("All models and retries failed")
+
 # --- Helper functions ---
 def clean_llm_response(text: str) -> str:
     text = re.sub(r'!\[[^\]]*\]\([^\)]*\)', '', text)
     text = re.sub(r'^#{1,6}\s+(.+)$', lambda m: f"\n{m.group(1).strip()}\n", text, flags=re.MULTILINE)
     text = re.sub(r'\*\*(.+?)\*\*', lambda m: m.group(1), text)
     return text.strip()
+
 def clean_to_plain_text(text: str) -> str:
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -182,6 +200,135 @@ def clean_to_plain_text(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
+
+def clean_pdf_content_for_quiz(content: str) -> str:
+    """Clean PDF content for quiz generation."""
+    if not content:
+        return ""
+    content = re.sub(r'\n\s*\n', '\n\n', content)
+    content = content.replace('\\', '\\\\').replace('"', '\\"')
+    return content[:50000]
+
+# ============================================
+# === CODING QUESTION DETECTION & FORMATTING ===
+# ============================================
+
+CODING_KEYWORDS = [
+    'code', 'coding', 'program', 'programming', 'function', 'method', 'class',
+    'variable', 'loop', 'array', 'list', 'dictionary', 'object', 'algorithm',
+    'python', 'java', 'javascript', 'cpp', 'c++', 'c#', 'ruby', 'go', 'rust',
+    'sql', 'html', 'css', 'react', 'node', 'django', 'flask', 'spring',
+    'write code', 'show code', 'example code', 'code example', 'snippet',
+    'implement', 'create function', 'define function', 'make a program',
+    'script', 'debug', 'error', 'exception', 'compile', 'run', 'execute',
+    'output', 'print', 'return value', 'input', 'parameter', 'argument',
+    'recursion', 'iteration', 'data structure', 'api', 'rest', 'json',
+    'database', 'query', 'select', 'insert', 'update', 'delete',
+    'frontend', 'backend', 'full stack', 'devops', 'git', 'version control'
+]
+
+CODING_PATTERNS = [
+    r'\b(write|show|give|create|make|build|develop)\s+(a\s+)?(code|program|function|script)\b',
+    r'\b(how to|how do i|can you)\s+(code|program|implement|create)\b',
+    r'\b(example|sample)\s+(code|program|function)\b',
+    r'\b(what does|explain)\s+(this|the)\s+code\b',
+    r'\b(fix|debug|solve)\s+(this|the)\s+(error|bug|problem)\b',
+    r'\b(print|output|result)\s+(of|for)\b',
+    r'^\s*(def|class|function|public|private|import|from|include)\b',
+]
+
+def is_coding_question(text: str) -> bool:
+    """Detect if the question is coding-related."""
+    text_lower = text.lower()
+    
+    keyword_count = sum(1 for kw in CODING_KEYWORDS if kw in text_lower)
+    if keyword_count >= 2:
+        return True
+    
+    for pattern in CODING_PATTERNS:
+        if re.search(pattern, text_lower):
+            return True
+    
+    if re.search(r'[\{\}\[\]\(\);:]', text) and re.search(r'\b(def|function|class|var|let|const|int|String|void)\b', text):
+        return True
+    
+    return False
+
+def format_coding_response(code: str, explanation: str, output: str, language: str = "python") -> str:
+    """Format coding response with code, explanation, and output."""
+    escaped_code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    escaped_output = output.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    html = f'''
+    <div style="font-family:'Segoe UI',Arial,sans-serif;color:white;">
+        <div style="margin:0 0 16px 0;background:#1e1e1e;border-radius:8px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.3);">
+            <div style="background:#2d2d2d;padding:8px 14px;border-bottom:1px solid #404040;display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:#61dafb;font-size:12px;font-weight:600;text-transform:uppercase;">{language.upper()} Code</span>
+                <span style="color:#888;font-size:11px;">📝</span>
+            </div>
+            <pre style="margin:0;padding:14px;overflow-x:auto;font-family:'Consolas','Monaco','Courier New',monospace;font-size:13px;line-height:1.6;color:#d4d4d4;"><code>{escaped_code}</code></pre>
+        </div>
+        <div style="margin:0 0 16px 0;background:rgba(99,102,241,0.1);border-left:4px solid #6366f1;border-radius:6px;padding:14px;">
+            <div style="color:#a5b4fc;font-size:13px;font-weight:600;margin-bottom:8px;">💡 Explanation</div>
+            <div style="color:#e0e0e0;font-size:14px;line-height:1.7;white-space:pre-wrap;">{explanation}</div>
+        </div>
+        <div style="margin:0 0 16px 0;background:#0d1117;border-radius:8px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.3);">
+            <div style="background:#161b22;padding:8px 14px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:#3fb950;font-size:12px;font-weight:600;text-transform:uppercase;">Output</span>
+                <span style="color:#888;font-size:11px;">▶️</span>
+            </div>
+            <pre style="margin:0;padding:14px;overflow-x:auto;font-family:'Consolas','Monaco','Courier New',monospace;font-size:13px;line-height:1.6;color:#3fb950;"><code>{escaped_output}</code></pre>
+        </div>
+    </div>
+    '''
+    return html.strip()
+
+def build_coding_system_prompt(language: str = "python") -> str:
+    return f"""You are NexusAI Coding Assistant. You provide COMPLETE, WORKING code with explanations.
+
+RULES FOR CODING QUESTIONS:
+1. ALWAYS provide complete, runnable code - no placeholders or incomplete snippets
+2. Include proper imports, error handling, and comments
+3. Code must be production-ready with best practices
+4. After code, explain how it works in simple terms
+5. Show expected output with sample values
+6. Use {language.upper()} unless user specifies otherwise
+
+RESPONSE FORMAT (JSON):
+{{
+    "code": "complete working code here",
+    "explanation": "clear explanation of how the code works",
+    "output": "expected output when running the code",
+    "language": "{language}"
+}}
+
+Return ONLY valid JSON. No markdown, no extra text."""
+
+def detect_language_from_question(text: str) -> str:
+    text_lower = text.lower()
+    language_map = {
+        'python': ['python', 'py', 'django', 'flask', 'pandas', 'numpy'],
+        'javascript': ['javascript', 'js', 'node', 'react', 'vue', 'angular', 'express'],
+        'java': ['java', 'spring', 'android'],
+        'cpp': ['c++', 'cpp', 'qt'],
+        'c': ['c language', 'embedded c'],
+        'csharp': ['c#', 'csharp', '.net', 'dotnet'],
+        'sql': ['sql', 'mysql', 'postgresql', 'database query'],
+        'html': ['html', 'html5'],
+        'css': ['css', 'css3', 'styling'],
+        'go': ['golang', 'go language'],
+        'rust': ['rust', 'rustlang'],
+        'ruby': ['ruby', 'rails'],
+    }
+    for lang, keywords in language_map.items():
+        if any(kw in text_lower for kw in keywords):
+            return lang
+    return 'python'
+
+# ============================================
+# === END: CODING QUESTION FEATURE ===
+# ============================================
+
 def extract_text_with_ocr(image_bytes: bytes, page_num: int) -> str:
     if not PYTESSERACT_AVAILABLE:
         return ""
@@ -202,6 +349,7 @@ def extract_text_with_ocr(image_bytes: bytes, page_num: int) -> str:
         return ""
     except Exception as e:
         return ""
+
 def extract_text_with_langchain(pdf_bytes: bytes) -> str:
     if not LANGCHAIN_AVAILABLE:
         return ""
@@ -223,6 +371,7 @@ def extract_text_with_langchain(pdf_bytes: bytes) -> str:
     except Exception as e:
         print(f"  ⚠️ LangChain extraction error: {e}")
         return ""
+
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     if LANGCHAIN_AVAILABLE:
         try:
@@ -284,6 +433,7 @@ def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     except Exception as e:
         print(f"⚠️ PDF extraction error: {e}")
         return ""
+
 def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
     try:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -308,6 +458,7 @@ def describe_image_with_groq(image_bytes: bytes, mime_type: str) -> str:
     except Exception as e:
         print(f"⚠ Image description error: {e}")
         return ""
+
 def answer_from_file_context(user_question: str, file_text: str, filename: str) -> Optional[str]:
     if not file_text or len(file_text.strip()) < 20:
         return None
@@ -354,6 +505,7 @@ def answer_from_file_context(user_question: str, file_text: str, filename: str) 
     except Exception as e:
         print(f"⚠ file-context answer error: {e}")
         return None
+
 # --- Background PDF processing ---
 def _background_process_pdf(pdf_bytes: bytes, filename: str):
     global _file_context
@@ -367,6 +519,7 @@ def _background_process_pdf(pdf_bytes: bytes, filename: str):
             with _file_context_lock:
                 _file_context["error"]      = "Could not extract text from PDF."
                 _file_context["processing"] = False
+                _file_context["ready"]      = False
             return
         with _file_context_lock:
             _file_context["text"]       = extracted_text
@@ -378,6 +531,8 @@ def _background_process_pdf(pdf_bytes: bytes, filename: str):
         with _file_context_lock:
             _file_context["error"]      = str(e)
             _file_context["processing"] = False
+            _file_context["ready"]      = False
+
 # --- File upload endpoint ---
 @app.post("/api/upload-file")
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -434,27 +589,32 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
+
 @app.get("/api/upload-status")
 async def upload_status():
     with _file_context_lock:
         return {"ready":_file_context.get("ready",False),"processing":_file_context.get("processing",False),
                 "error":_file_context.get("error",""),"filename":_file_context.get("filename",""),
                 "chars_extracted":len(_file_context.get("text",""))}
+
 @app.post("/api/clear-file")
 async def clear_file():
     global _file_context
     with _file_context_lock:
         _file_context = {"text":"","filename":"","type":"","processing":False,"ready":False,"error":""}
     return {"success":True,"message":"File context cleared."}
+
 # --- SVG diagram generation (cached with thread safety) ---
 _svg_cache: OrderedDict = OrderedDict()
 _SVG_CACHE_MAX = 60
 _svg_cache_lock = threading.Lock()
+
 def _cache_svg(key: str, value: str):
     with _svg_cache_lock:
         if key in _svg_cache: _svg_cache.move_to_end(key)
         _svg_cache[key] = value
         while len(_svg_cache) > _SVG_CACHE_MAX: _svg_cache.popitem(last=False)
+
 def generate_svg_diagram(user_message: str) -> Tuple[str, str]:
     msg_lower = user_message.lower().strip()
     skip_patterns = ['who is','who was','who are','actor','actress','singer','politician','celebrity','what is your name','how are you','thank you','thanks']
@@ -506,6 +666,7 @@ Start immediately with <svg"""
     data_url = "data:image/svg+xml;base64," + base64.b64encode(svg.encode('utf-8')).decode('utf-8')
     _cache_svg(cache_key, data_url)
     return data_url, user_message[:50]
+
 def _make_fallback_svg(user_message: str) -> str:
     msg = user_message.lower(); title = user_message.title()[:45]
     if any(w in msg for w in ['python','java','javascript','compiler','interpreter']):
@@ -544,9 +705,11 @@ def _make_fallback_svg(user_message: str) -> str:
 <text x="430" y="50" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" font-weight="bold" fill="#222">{title}</text>
 {boxes_svg}{arrows_svg}
 </svg>"""
+
 def get_image_for_topic(user_message: str) -> str:
     data_url, _ = generate_svg_diagram(user_message)
     return data_url
+
 def create_html_with_image(text_response: str, image_url: str, topic: str) -> str:
     if not image_url: return text_response
     if 'data:image/svg+xml;base64' in text_response: return text_response
@@ -559,6 +722,7 @@ def create_html_with_image(text_response: str, image_url: str, topic: str) -> st
 {image_html}
 <div {content_style}>{text_response}</div>
 </div>'''
+
 # --- Language & mixed language detection ---
 def extract_user_context(user_message: str) -> str:
     msg_lower = user_message.lower()
@@ -578,6 +742,7 @@ def extract_user_context(user_message: str) -> str:
     if wants_notes:
         parts.append("Format as structured notes: use numbered points and sub-points, short crisp sentences, key terms in Title Case — not long paragraphs.")
     return "\n".join(parts)
+
 LANG_NAME_MAP = {
     'ta':'Tamil','hi':'Hindi','te':'Telugu','ml':'Malayalam','kn':'Kannada',
     'bn':'Bengali','mr':'Marathi','gu':'Gujarati','pa':'Punjabi','ur':'Urdu',
@@ -585,6 +750,7 @@ LANG_NAME_MAP = {
     'pt':'Portuguese','ru':'Russian','zh-cn':'Chinese','ja':'Japanese','ko':'Korean',
     'nl':'Dutch','sv':'Swedish','tr':'Turkish','pl':'Polish','en':'English',
 }
+
 def detect_language(text: str) -> str:
     try:
         if re.search(r'[\u0B80-\u0BFF]',text): return 'ta'
@@ -599,33 +765,38 @@ def detect_language(text: str) -> str:
         if re.search(r'[\u0980-\u09FF]',text): return 'bn'
         return 'en'
     except: return 'en'
+
 MIXED_LANG_PATTERNS: List[Tuple] = [
     (re.compile(r'\b(sollu|solli|soll|kudu|theriyuma|puriyuma|pannunga|pannu|da|di|bro|machan|seri|illa|ama|romba)\b',re.IGNORECASE),
-    "Tanglish (Tamil-English mix — reply naturally in Tanglish, mixing Tamil words and English)","tanglish"),
+     "Tanglish (Tamil-English mix — reply naturally in Tanglish, mixing Tamil words and English)","tanglish"),
     (re.compile(r'\b(bolna|bolo|bata|batao|bol|kya|kaise|kyun|samjhao|yaar|bhai|mujhe|sikhao|padha)\b',re.IGNORECASE),
-    "Hinglish (Hindi-English mix — reply naturally in Hinglish, mixing Hindi words and English)","hinglish"),
+     "Hinglish (Hindi-English mix — reply naturally in Hinglish, mixing Hindi words and English)","hinglish"),
     (re.compile(r'\b(para|parayan|enthaa|ningal|njan|onnum|ille)\b',re.IGNORECASE),
-    "Manglish (Malayalam-English mix — reply naturally in Manglish)","manglish"),
+     "Manglish (Malayalam-English mix — reply naturally in Manglish)","manglish"),
     (re.compile(r'\b(heli|helri|hegide|yaake|yaaru|enu|illi|gottilla|nodri)\b',re.IGNORECASE),
-    "Kanglish (Kannada-English mix — reply naturally in Kanglish)","kanglish"),
+     "Kanglish (Kannada-English mix — reply naturally in Kanglish)","kanglish"),
 ]
+
 _ALL_MIXED_TRIGGERS = re.compile(
     r'\b(sollu|solli|soll|kudu|theriyuma|puriyuma|pannunga|pannu|da|di|bro|machan|seri|illa|ama|romba|'
     r'bolna|bolo|bata|batao|bol|kya|kaise|kyun|samjhao|yaar|bhai|mujhe|sikhao|padha|'
     r'para|parayan|enthaa|ningal|njan|onnum|ille|heli|helri|nodri)\b',
     re.IGNORECASE
 )
+
 def detect_mixed_language(text: str) -> Optional[Tuple[str,str]]:
     for pattern,lang_label,lang_code in MIXED_LANG_PATTERNS:
         if pattern.search(text):
             print(f"🌐 Mixed language detected: {lang_code}")
             return lang_label,lang_code
     return None
+
 def extract_core_topic_from_mixed(text: str) -> str:
     cleaned = _ALL_MIXED_TRIGGERS.sub(' ',text)
     cleaned = re.sub(r'\s+',' ',cleaned).strip()
     cleaned = re.sub(r'^[?!.,\s]+|[?!.,\s]+$','',cleaned).strip()
     return cleaned if len(cleaned)>=2 else text
+
 async def process_user_input(text: str) -> tuple:
     mixed = detect_mixed_language(text)
     if mixed:
@@ -650,10 +821,12 @@ async def process_user_input(text: str) -> tuple:
             print(f"🌐 Native script → '{translated}'")
             return translated, lang_code
     return text, lang_code
+
 def build_language_instruction(detected_lang: str) -> str:
     if len(detected_lang) > 10:
         return f"Respond in {detected_lang}."
     return f"Respond in {LANG_NAME_MAP.get(detected_lang.lower(),'English')} language."
+
 async def translate_headings(lang_code: str) -> dict:
     fallback = {'intro':'INTRODUCTION','concepts':'CORE CONCEPTS','fundamental':'FUNDAMENTAL CONCEPTS',
                 'detailed':'DETAILED EXPLANATION','example':'EXAMPLE','examples':'REAL-WORLD EXAMPLES',
@@ -678,8 +851,10 @@ async def translate_headings(lang_code: str) -> dict:
         except: return fallback
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, translate_headings_sync)
+
 async def get_section_headings(lang_code: str) -> dict:
     return await translate_headings(lang_code)
+
 # --- Pattern definitions ---
 GREETING_PATTERN    = re.compile(r'^\s*(hello|hi|hey|greetings|good morning|good afternoon|good evening|what\'s up|howdy|hiya)\b',re.IGNORECASE)
 PAGE_PATTERN        = re.compile(r'(\d+)\s*pages?\b',re.IGNORECASE)
@@ -690,6 +865,7 @@ NOTES_PATTERN       = re.compile(r'\bnotes?\b|\bsummary\b|\bsummaries\b|\bovervi
 WORD_COUNT_PATTERN  = re.compile(r'(\d+)\s*(?:words?|word count)\b', re.IGNORECASE)
 CHAR_COUNT_PATTERN  = re.compile(r'(\d+)\s*(?:chars?|characters?)\b', re.IGNORECASE)
 MULTI_QUESTION_KEYWORDS = ['questions', 'question', 'each', 'all', 'every', 'following', 'below', 'these']
+
 def detect_multiple_questions(text: str) -> bool:
     lines = [l.strip() for l in text.split('\n') if l.strip() and len(l) > 5]
     numbered_lines = [l for l in lines if re.match(r'^\d+\.?\s+', l)]
@@ -703,6 +879,7 @@ def detect_multiple_questions(text: str) -> bool:
     if has_multi_keyword and question_marks >= 2:
         return True
     return False
+
 def calculate_points_from_marks(marks: int, user_points: Optional[int] = None) -> int:
     if user_points is not None and user_points > 0:
         return user_points
@@ -711,6 +888,7 @@ def calculate_points_from_marks(marks: int, user_points: Optional[int] = None) -
     if marks == 2:
         return 2
     return marks * 3
+
 def extract_marks_and_points_flexible(msg_lower: str) -> Tuple[Optional[int], Optional[int]]:
     marks = None
     points = None
@@ -730,11 +908,14 @@ def extract_marks_and_points_flexible(msg_lower: str) -> Tuple[Optional[int], Op
     if give_points_match:
         points = int(give_points_match.group(1))
     return marks, points
+
 @lru_cache(maxsize=128)
 def is_greeting_cached(msg: str) -> bool:
     return bool(GREETING_PATTERN.search(msg))
+
 def is_greeting(msg: str) -> bool:
     return is_greeting_cached(msg.strip())
+
 @lru_cache(maxsize=64)
 def extract_questions_comprehensive_cached(text: str) -> tuple:
     questions,seen,unique=[],set(),[]
@@ -761,10 +942,13 @@ def extract_questions_comprehensive_cached(text: str) -> tuple:
             unique.append(q)
             seen.add(k)
     return tuple(unique)
+
 def extract_questions_comprehensive(text: str) -> list:
     return list(extract_questions_comprehensive_cached(text))
+
 def calculate_word_count_from_pages(pages: int) -> int: return pages*250
 def calculate_word_count_from_marks(marks: int) -> int: return marks*50
+
 def detect_mode_from_message(msg_lower: str) -> Tuple[str,int]:
     if any(t in msg_lower for t in ["explain in detail","detailed explanation","comprehensive","in depth"]): return "detailed_no_schedule",2
     if any(t in msg_lower for t in ["teach me","explain like","for beginners","simple"]): return "teaching",2
@@ -775,6 +959,7 @@ def detect_mode_from_message(msg_lower: str) -> Tuple[str,int]:
         gn=POINT_PATTERN.search(msg_lower) or MARK_PATTERN.search(msg_lower)
         if gn: return "points",int(gn.group(1))
     return "detailed",2
+
 def extract_length_constraint(msg_lower: str) -> Optional[dict]:
     word_match = WORD_COUNT_PATTERN.search(msg_lower)
     if word_match:
@@ -783,6 +968,7 @@ def extract_length_constraint(msg_lower: str) -> Optional[dict]:
     if char_match:
         return {'count': int(char_match.group(1)), 'type': 'chars'}
     return None
+
 def build_system_prompt(mode, point_count, user_context, detected_lang, headings, page_match=None, mark_match=None,
                         length_constraint=None, multiple_questions=False, marks_for_multi=None, points_for_multi=None) -> Tuple[str,int]:
     lang_instr=build_language_instruction(detected_lang)
@@ -818,8 +1004,8 @@ def build_system_prompt(mode, point_count, user_context, detected_lang, headings
             estimated_tokens = int(count * 1.3 * 1.2)
         else:
             estimated_tokens = int((count / 4) * 1.2)
-        estimated_tokens = max(estimated_tokens, 500)
-        estimated_tokens = min(estimated_tokens, default_max_tok)
+            estimated_tokens = max(estimated_tokens, 500)
+            estimated_tokens = min(estimated_tokens, default_max_tok)
         default_max_tok = estimated_tokens
     if mode=="notes":
         prompt_parts.append("Generate comprehensive structured NOTES on the topic.")
@@ -848,8 +1034,9 @@ def build_system_prompt(mode, point_count, user_context, detected_lang, headings
     prompt_parts.append(f"{headings['insights']}")
     prompt_parts.append("NO timetable. NO study schedule. NO markdown image tags.")
     return ("\n".join(prompt_parts), 16000)
+
 # ============================================
-# === FIX: ONLY THESE TWO ENDPOINTS CHANGED ===
+# === TEACH ENDPOINTS ===
 # ============================================
 @app.post("/api/teach-simple")
 async def teach_simple(request: SimpleTeachRequest):
@@ -858,14 +1045,12 @@ async def teach_simple(request: SimpleTeachRequest):
         language = request.language
         previous_response = request.previous_response.strip()
         questions = request.questions or []
-        # Check if multiple questions exist (2 or more)
         is_multiple = len(questions) >= 2
         loop = asyncio.get_event_loop()
         def _run_teach():
             if is_multiple:
-                # Process ALL questions for multiple question mode
                 all_simplified = []
-                for i, q in enumerate(questions[:10]):  # Limit to 10 questions max
+                for i, q in enumerate(questions[:10]):
                     system_prompt = (
                         f"You are NexusAI. Explain '{q}' simply in 150-200 words (1 paragraph).\n"
                         f"RULES: Simple language, clear explanation, no jargon. "
@@ -883,7 +1068,6 @@ async def teach_simple(request: SimpleTeachRequest):
                         all_simplified.append(f"**Question {i+1}:** {q}\n[Could not simplify this question]\n")
                 return "\n---\n".join(all_simplified)
             else:
-                # Single question behavior - EXACTLY as original
                 if previous_response:
                     plain_prev = re.sub(r'<[^>]+>', ' ', previous_response)[:3000].strip()
                     system_prompt = (
@@ -916,20 +1100,19 @@ async def teach_simple(request: SimpleTeachRequest):
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="An error occurred. Please try again.")
+
 @app.post("/api/explain-like-child")
 async def explain_like_child(request: ChildTeachRequest):
     try:
         topic = request.topic
         language = request.language
         questions = request.questions or []
-        # Check if multiple questions exist (2 or more)
         is_multiple = len(questions) >= 2
         loop = asyncio.get_event_loop()
         def _run_child():
             if is_multiple:
-                # Process ALL questions for multiple question mode
                 all_explained = []
-                for i, q in enumerate(questions[:5]):  # Limit to 5 questions for child mode
+                for i, q in enumerate(questions[:5]):
                     def build_child_prompt(strict=False):
                         base = (
                             f"You are a friendly teacher explaining '{q}' to a 5-year-old child.\n"
@@ -980,7 +1163,6 @@ async def explain_like_child(request: ChildTeachRequest):
                         all_explained.append(f"**Question {i+1}:** {q}\n[Could not explain this question simply]\n")
                 return "\n---\n".join(all_explained)
             else:
-                # Single question behavior - EXACTLY as original
                 def build_prompt(strict=False):
                     base = (
                         f"You are a friendly teacher explaining '{topic}' to a 5-year-old child.\n"
@@ -1042,8 +1224,9 @@ async def explain_like_child(request: ChildTeachRequest):
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="An error occurred. Please try again.")
+
 # ============================================
-# === END: ONLY THESE TWO ENDPOINTS CHANGED ===
+# === CHAT ENDPOINTS ===
 # ============================================
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
@@ -1064,6 +1247,57 @@ async def chat(request: ChatRequest):
         headings = await get_section_headings(detected_lang)
         if is_greeting(latest_user_msg):
             return {"response":"Hello! I'm NexusAI, your intelligent assistant. How can I help you today?"}
+        
+        # ============================================
+        # === CHECK FOR CODING QUESTION ===
+        # ============================================
+        is_coding = is_coding_question(latest_user_msg)
+        if is_coding:
+            print(f"💻 Coding question detected: {latest_user_msg[:50]}")
+            coding_lang = detect_language_from_question(latest_user_msg)
+            loop = asyncio.get_event_loop()
+            
+            def _run_coding_response():
+                try:
+                    comp = get_groq_client().chat.completions.create(
+                        model="openai/gpt-oss-safeguard-20b",
+                        messages=[
+                            {"role":"system","content":build_coding_system_prompt(coding_lang)},
+                            {"role":"user","content":f"Question: {english_query}"}
+                        ],
+                        temperature=0.2,
+                        max_tokens=3000,
+                        timeout=30.0,
+                    )
+                    raw = comp.choices[0].message.content.strip()
+                    raw = re.sub(r'^```[a-zA-Z]*\n?','',raw).rstrip("`").strip()
+                    start=raw.find('{'); end=raw.rfind('}')
+                    if start!=-1 and end!=-1:
+                        raw = raw[start:end+1]
+                    response_data = json.loads(raw)
+                    return format_coding_response(
+                        code=response_data.get("code", ""),
+                        explanation=response_data.get("explanation", ""),
+                        output=response_data.get("output", ""),
+                        language=response_data.get("language", coding_lang)
+                    )
+                except Exception as e:
+                    print(f"⚠ Coding response error: {e}")
+                    return None
+            
+            try:
+                coding_response = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _run_coding_response),
+                    timeout=35.0
+                )
+                if coding_response:
+                    return {"response": coding_response}
+            except Exception as e:
+                print(f"⚠ Coding response failed, using regular chat: {e}")
+        # ============================================
+        # === END: CODING QUESTION CHECK ===
+        # ============================================
+        
         user_context=extract_user_context(latest_user_msg)
         is_multiple_questions = detect_multiple_questions(latest_user_msg)
         marks_extracted, points_extracted = extract_marks_and_points_flexible(msg_lower)
@@ -1081,7 +1315,7 @@ async def chat(request: ChatRequest):
             print(f"✅ Default mode - images allowed")
         image_url=""
         loop = asyncio.get_event_loop()
-        if not skip_image and len(english_query)>=2:
+        if not skip_image and len(english_query)>=2 and not is_coding:
             try:
                 image_url = await asyncio.wait_for(
                     loop.run_in_executor(_executor, get_image_for_topic, english_query),
@@ -1175,6 +1409,7 @@ Format: QUESTION 1: then paragraph answer."""
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="An error occurred. Please try again.")
+
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     messages=request.messages
@@ -1195,9 +1430,103 @@ async def chat_stream(request: ChatRequest):
     if is_greeting(latest_user_msg):
         greeting="Hello! I'm NexusAI, your intelligent assistant. How can I help you today?"
         async def greeting_gen():
-            yield f"data: {json.dumps({'type':'token','content':greeting})}\n"
-            yield f"data: {json.dumps({'type':'done'})}\n"
+            yield f"data: {json.dumps({'type':'token','content':greeting})}\n\n"
+            yield f"data: {json.dumps({'type':'done'})}\n\n"
         return StreamingResponse(greeting_gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+    
+    # ============================================
+    # === CHECK FOR CODING QUESTION (STREAM) ===
+    # ============================================
+    is_coding = is_coding_question(latest_user_msg)
+    if is_coding:
+        print(f"💻 Streaming: Coding question detected")
+        coding_lang = detect_language_from_question(latest_user_msg)
+        
+        def sync_coding_stream_gen():
+            # --- Handle file context prefix (same as normal chat) ---
+            prefix_html = ""
+            with _file_context_lock:
+                fname = _file_context.get("filename")
+                processing = _file_context.get("processing")
+                ready = _file_context.get("ready")
+                ftext = _file_context.get("text")
+                if fname:
+                    if processing:
+                        prefix_html = ('<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;'
+                                      'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#a5b4fc;font-size:13px;">'
+                                      f'⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge for now.</div>')
+                    elif ready and ftext:
+                        file_answer = answer_from_file_context(english_query, ftext, fname)
+                        if file_answer:
+                            badge = ('<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;'
+                                    'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#7fffb8;font-size:13px;">'
+                                    f'📄 Answer sourced from: <strong>{fname}</strong></div>')
+                            # Send the file answer as a complete response
+                            yield f"data: {json.dumps({'type':'token','content':badge + file_answer})}\n\n"
+                            yield f"data: {json.dumps({'type':'done'})}\n\n"
+                            return
+                        else:
+                            prefix_html = ('<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;'
+                                          'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#ffd580;font-size:13px;">'
+                                          f'⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
+            if prefix_html:
+                yield f"data: {json.dumps({'type':'token','content':prefix_html})}\n\n"
+            
+            # --- Generate coding response ---
+            try:
+                comp = get_groq_client().chat.completions.create(
+                    model="openai/gpt-oss-safeguard-20b",
+                    messages=[
+                        {"role":"system","content":build_coding_system_prompt(coding_lang)},
+                        {"role":"user","content":f"Question: {english_query}"}
+                    ],
+                    temperature=0.2,
+                    max_tokens=3000,
+                    timeout=30.0,
+                )
+                raw = comp.choices[0].message.content.strip()
+                print(f"📝 Raw coding response received: {len(raw)} chars")
+                
+                # Extract JSON
+                raw = re.sub(r'^```[a-zA-Z]*\n?','',raw).rstrip("`").strip()
+                start=raw.find('{'); end=raw.rfind('}')
+                if start!=-1 and end!=-1:
+                    raw = raw[start:end+1]
+                response_data = json.loads(raw)
+                print(f"✅ JSON parsed successfully")
+                
+                # Format HTML
+                formatted = format_coding_response(
+                    code=response_data.get('code',''),
+                    explanation=response_data.get('explanation',''),
+                    output=response_data.get('output',''),
+                    language=response_data.get('language',coding_lang)
+                )
+                # Stream the formatted HTML as tokens (split into chunks for smooth streaming)
+                chunk_size = 100  # characters per chunk
+                for i in range(0, len(formatted), chunk_size):
+                    yield f"data: {json.dumps({'type':'token','content':formatted[i:i+chunk_size]})}\n\n"
+                yield f"data: {json.dumps({'type':'done'})}\n\n"
+                
+            except json.JSONDecodeError as e:
+                print(f"⚠️ JSON decode error: {e}")
+                print(f"Raw response: {raw[:500]}")
+                yield f"data: {json.dumps({'type':'error','message':'Failed to parse coding response'})}\n\n"
+                yield f"data: {json.dumps({'type':'done'})}\n\n"
+            except Exception as e:
+                import traceback
+                error_trace = traceback.format_exc()
+                print(f"⚠️ Coding stream error: {e}")
+                print(error_trace)
+                yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+                yield f"data: {json.dumps({'type':'done'})}\n\n"
+        
+        return StreamingResponse(sync_coding_stream_gen(),media_type="text/event-stream",
+                                headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
+    # ============================================
+    # === END: CODING QUESTION CHECK (STREAM) ===
+    # ============================================
+    
     is_multiple_questions = detect_multiple_questions(latest_user_msg)
     marks_extracted, points_extracted = extract_marks_and_points_flexible(msg_lower)
     current_questions = extract_questions_comprehensive(latest_user_msg)
@@ -1237,7 +1566,7 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
         llm_messages=[{"role":"system","content":system_prompt},{"role":"user","content":english_query}]
     def sync_stream_gen():
         svg_future = None
-        if not skip_image and len(english_query)>=2:
+        if not skip_image and len(english_query)>=2 and not is_coding:
             svg_future = _executor.submit(get_image_for_topic, english_query)
         with _file_context_lock:
             fname = _file_context.get("filename")
@@ -1249,23 +1578,23 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
                     _indexing_html=('<div style="background:rgba(99,102,241,0.12);border-left:4px solid #6366f1;'
                                    'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#a5b4fc;font-size:13px;">'
                                    f'⏳ Still indexing <strong>{fname}</strong> — answering from general knowledge.</div>')
-                    yield f"data: {json.dumps({'type':'prefix','content':_indexing_html})}\n"
+                    yield f"data: {json.dumps({'type':'prefix','content':_indexing_html})}\n\n"
                 elif ready and ftext:
                     file_answer=answer_from_file_context(english_query,ftext,fname)
                     if file_answer:
                         badge=('<div style="background:rgba(0,180,100,0.15);border-left:4px solid #00b464;'
                               'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#7fffb8;font-size:13px;">'
                               f'📄 Answer sourced from: <strong>{fname}</strong></div>')
-                        yield f"data: {json.dumps({'type':'prefix','content':badge})}\n"
-                        yield f"data: {json.dumps({'type':'token','content':file_answer})}\n"
-                        yield f"data: {json.dumps({'type':'done'})}\n"
+                        yield f"data: {json.dumps({'type':'prefix','content':badge})}\n\n"
+                        yield f"data: {json.dumps({'type':'token','content':file_answer})}\n\n"
+                        yield f"data: {json.dumps({'type':'done'})}\n\n"
                         return
                     else:
                         _notfound_html=('<div style="background:rgba(255,160,0,0.12);border-left:4px solid #ffa000;'
                                        'padding:8px 14px;margin-bottom:14px;border-radius:4px;color:#ffd580;font-size:13px;">'
                                        f'⚠️ Not found in uploaded file ({fname}). Here is the answer from my knowledge:</div>')
-                        yield f"data: {json.dumps({'type':'prefix','content':_notfound_html})}\n"
-        yield f"data: {json.dumps({'type':'start'})}\n"
+                        yield f"data: {json.dumps({'type':'prefix','content':_notfound_html})}\n\n"
+        yield f"data: {json.dumps({'type':'start'})}\n\n"
         try:
             stream=get_groq_client().chat.completions.create(
                 model="openai/gpt-oss-20b",
@@ -1279,7 +1608,7 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
             for chunk in stream:
                 delta=chunk.choices[0].delta.content
                 if delta:
-                    yield f"data: {json.dumps({'type':'token','content':delta})}\n"
+                    yield f"data: {json.dumps({'type':'token','content':delta})}\n\n"
         except Exception as e:
             err=str(e)
             if '429' in err or 'rate_limit' in err.lower():
@@ -1296,50 +1625,68 @@ MULTIPLE QUESTIONS MODE: Answer each with a paragraph. NO diagrams, NO images.""
                     for chunk in stream2:
                         delta=chunk.choices[0].delta.content
                         if delta:
-                            yield f"data: {json.dumps({'type':'token','content':delta})}\n"
+                            yield f"data: {json.dumps({'type':'token','content':delta})}\n\n"
                 except Exception:
-                    yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n"
+                    yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n\n"
             else:
-                yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n"
+                yield f"data: {json.dumps({'type':'error','message':'Failed to generate response'})}\n\n"
         if svg_future:
             try:
                 image_url=svg_future.result(timeout=25)
                 if image_url:
-                    yield f"data: {json.dumps({'type':'image','url':image_url})}\n"
+                    yield f"data: {json.dumps({'type':'image','url':image_url})}\n\n"
             except Exception:
                 pass
-        yield f"data: {json.dumps({'type':'done'})}\n"
+        yield f"data: {json.dumps({'type':'done'})}\n\n"
     return StreamingResponse(sync_stream_gen(),media_type="text/event-stream",
                             headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
-# ============================================
-# === FIX: QUIZ GENERATE & EVALUATE ENDPOINTS ===
-# ============================================
-# ============================================
-# === FIX: QUIZ GENERATE & EVALUATE ENDPOINTS ===
-# ============================================
 
-
-
-
+# ============================================
+# === QUIZ GENERATE & EVALUATE ENDPOINTS ===
+# ============================================
 @app.post("/api/quiz/generate")
 async def quiz_generate(request: QuizGenerateRequest):
     is_mcq = request.marks_per_question == 1
     loop = asyncio.get_event_loop()
-    # FIX: Check if file context is available and should be used
+    
     use_file_content = request.use_file_context
     file_content = ""
     filename = ""
     if use_file_content:
         with _file_context_lock:
-            if _file_context.get("ready") and _file_context.get("text"):
-                # FIX: Clean the PDF content before using for quiz generation
-                raw_content = _file_context.get("text", "")
+            ready = _file_context.get("ready", False)
+            processing = _file_context.get("processing", False)
+            raw_content = _file_context.get("text", "")
+            filename = _file_context.get("filename", "uploaded file")
+            if not ready:
+                if processing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="File is still processing. Please wait a moment and try again."
+                    )
+                else:
+                    # File not ready and not processing (maybe error)
+                    raise HTTPException(
+                        status_code=400,
+                        detail="No file content available. Please upload a file first or disable 'Use File Context'."
+                    )
+            if raw_content:
                 file_content = clean_pdf_content_for_quiz(raw_content)
-                filename = _file_context.get("filename", "uploaded file")
+                if not file_content:
+                    # Content empty after cleaning
+                    raise HTTPException(
+                        status_code=400,
+                        detail="File content is empty. Could not extract text from the file."
+                    )
+            else:
+                # Ready but no text
+                raise HTTPException(
+                    status_code=400,
+                    detail="File content is empty. Could not extract text from the file."
+                )
     
     def _run_quiz():
         if is_mcq:
-            # FIX: MCQ generation with file content support
             if use_file_content and file_content:
                 mcq_system = (
                     "You are a university exam MCQ generator. "
@@ -1366,7 +1713,6 @@ async def quiz_generate(request: QuizGenerateRequest):
                     f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
                 )
             else:
-                # Original subject-name based MCQ generation (unchanged)
                 mcq_system = (
                     "You are a university exam MCQ generator. "
                     "Generate multiple-choice questions with 4 REAL, TOPIC-SPECIFIC answer options. "
@@ -1389,7 +1735,9 @@ async def quiz_generate(request: QuizGenerateRequest):
                     f'"correct_option":"B) def","max_marks":1,"expected_keywords":["def","function","define"]}}]\n'
                     f"Generate {request.num_questions} questions about '{request.topic}'. Start with ["
                 )
+            
             bad_patterns = ["option 1","option 2","option 3","option 4","option a","option b","option c","option d","placeholder"]
+            
             def validate_mcq(questions: list) -> list:
                 prefixes = ["A) ","B) ","C) ","D) "]
                 valid = []
@@ -1405,32 +1753,46 @@ async def quiz_generate(request: QuizGenerateRequest):
                         prefixed.append(s)
                     q["options"] = prefixed
                     q["max_marks"] = 1
-                    # FIX: Ensure expected_keywords exists for each question
                     if "expected_keywords" not in q or not q["expected_keywords"]:
                         q["expected_keywords"] = []
                     valid.append(q)
                 return valid
+            
             for attempt in range(2):
-                comp = get_groq_client().chat.completions.create(
-                    model="openai/gpt-oss-safeguard-20b",
-                    messages=[{"role":"system","content":mcq_system},{"role":"user","content":mcq_user}],
-                    temperature=0.3 if attempt==0 else 0.15,
-                    max_tokens=2500,
-                    timeout=30.0,
-                )
-                raw = comp.choices[0].message.content.strip()
-                raw = re.sub(r"^```[a-zA-Z]*\n?","",raw).rstrip("`").strip()
-                start=raw.find('['); end=raw.rfind(']')
-                if start==-1 or end==-1: continue
-                parsed    = json.loads(raw[start:end+1])
-                validated = validate_mcq(parsed)
-                if validated:
-                    print(f"✅ MCQ: {len(validated)} valid questions for '{request.topic}'")
-                    return {"questions": validated}
-                print(f"⚠ MCQ attempt {attempt+1}: no valid options, retrying...")
+                try:
+                    comp = get_groq_client().chat.completions.create(
+                        model="openai/gpt-oss-safeguard-20b",
+                        messages=[{"role":"system","content":mcq_system},{"role":"user","content":mcq_user}],
+                        temperature=0.3 if attempt==0 else 0.15,
+                        max_tokens=2500,
+                        timeout=30.0,
+                    )
+                    raw = comp.choices[0].message.content.strip()
+                    
+                    if not raw or not raw.strip():
+                        print(f"⚠ MCQ attempt {attempt+1}: empty response")
+                        continue
+                    
+                    raw = re.sub(r"^```[a-zA-Z]*\n?","",raw).rstrip("`").strip()
+                    start=raw.find('['); end=raw.rfind(']')
+                    if start==-1 or end==-1:
+                        print(f"⚠ MCQ attempt {attempt+1}: no JSON array found")
+                        continue
+                    parsed = json.loads(raw[start:end+1])
+                    validated = validate_mcq(parsed)
+                    if validated:
+                        print(f"✅ MCQ: {len(validated)} valid questions for '{request.topic}'")
+                        return {"questions": validated}
+                    print(f"⚠ MCQ attempt {attempt+1}: no valid options, retrying...")
+                except json.JSONDecodeError as e:
+                    print(f"⚠ MCQ attempt {attempt+1}: JSON decode error - {e}")
+                    continue
+                except Exception as e:
+                    print(f"⚠ MCQ attempt {attempt+1}: error - {e}")
+                    continue
             raise HTTPException(status_code=500, detail="Could not generate valid MCQ options. Please try again.")
+        
         else:
-            # FIX: Non-MCQ generation with file content support
             if use_file_content and file_content:
                 system_prompt = (
                     "You are a university exam paper setter. "
@@ -1451,10 +1813,10 @@ async def quiz_generate(request: QuizGenerateRequest):
                     f"For {request.marks_per_question}-mark questions: define/state/list/give one example. "
                     f"Each question is worth exactly {request.marks_per_question} marks. "
                     f"Return ONLY a valid JSON array like: "
-                    f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question},"expected_keywords":["X","formula","define"]}}]'
+                    f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question},"expected_keywords":["X","formula","define"]}}]\n'
+                    f"Start with ["
                 )
             else:
-                # Original subject-name based question generation (unchanged)
                 system_prompt = (
                     "You are a university exam paper setter. "
                     "Generate REAL, SPECIFIC exam questions — never placeholder text like "
@@ -1472,38 +1834,78 @@ async def quiz_generate(request: QuizGenerateRequest):
                     f"For {request.marks_per_question}-mark questions: define/state/list/give one example. "
                     f"Each question is worth exactly {request.marks_per_question} marks. "
                     f"Return ONLY a valid JSON array like: "
-                    f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question},"expected_keywords":["X","formula","define"]}}]'
+                    f'[{{"id":"q1","question":"Define X and state its formula.","max_marks":{request.marks_per_question},"expected_keywords":["X","formula","define"]}}]\n'
+                    f"Start with ["
                 )
-            raw = chat_completion(
-                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
-                temperature=0.4, max_tokens=1500, timeout=30.0,
-            )
-            raw = re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
-            questions = json.loads(raw)
-            placeholder_patterns = ["question 1","question 2","question 3",f"{request.topic.lower()} question","placeholder","sample question"]
-            for q in questions:
-                if any(p in q.get("question","").lower() for p in placeholder_patterns):
-                    raise HTTPException(status_code=500, detail="Generated placeholder questions. Please try again.")
-            # FIX: Ensure expected_keywords exists for each question
-            if "expected_keywords" not in q or not q["expected_keywords"]:
-                q["expected_keywords"] = []
-            return {"questions": questions}
+            
+            for attempt in range(2):
+                try:
+                    raw = chat_completion(
+                        messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
+                        temperature=0.4 if attempt==0 else 0.2,
+                        max_tokens=1500,
+                        timeout=30.0,
+                    )
+                    
+                    if not raw or not raw.strip():
+                        print(f"⚠ Quiz attempt {attempt+1}: empty response")
+                        continue
+                    
+                    raw = re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
+                    
+                    start = raw.find('[')
+                    end = raw.rfind(']')
+                    if start == -1 or end == -1:
+                        print(f"⚠ Quiz attempt {attempt+1}: no JSON array found in response")
+                        print(f"Response preview: {raw[:200]}")
+                        continue
+                    
+                    json_str = raw[start:end+1]
+                    questions = json.loads(json_str)
+                    
+                    if not questions or not isinstance(questions, list):
+                        print(f"⚠ Quiz attempt {attempt+1}: invalid JSON structure")
+                        continue
+                    
+                    placeholder_patterns = ["question 1","question 2","question 3",f"{request.topic.lower()} question","placeholder","sample question"]
+                    valid_questions = []
+                    for q in questions:
+                        if any(p in q.get("question","").lower() for p in placeholder_patterns):
+                            continue
+                        if "expected_keywords" not in q or not q["expected_keywords"]:
+                            q["expected_keywords"] = []
+                        valid_questions.append(q)
+                    
+                    if valid_questions:
+                        print(f"✅ Quiz: {len(valid_questions)} valid questions for '{request.topic}'")
+                        return {"questions": valid_questions}
+                    
+                    print(f"⚠ Quiz attempt {attempt+1}: all questions filtered out")
+                    
+                except json.JSONDecodeError as e:
+                    print(f"⚠ Quiz attempt {attempt+1}: JSON decode error - {e}")
+                    print(f"Response: {raw[:500]}")
+                    continue
+                except Exception as e:
+                    print(f"⚠ Quiz attempt {attempt+1}: error - {e}")
+                    continue
+            
+            raise HTTPException(status_code=500, detail="Could not generate valid quiz questions. Please try again.")
     
     try:
         result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_quiz), timeout=35.0)
         return result
-    except HTTPException: raise
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Failed to generate quiz questions.")
 
-
 @app.post("/api/quiz/evaluate")
 async def quiz_evaluate(request: QuizEvaluateRequest):
     try:
         loop = asyncio.get_event_loop()
         def _run_eval():
-            # FIX: Build per-question keyword matching instructions
             question_keyword_info = []
             for a in request.answers:
                 keywords = a.expected_keywords if a.expected_keywords else []
@@ -1518,58 +1920,6 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
                     f"Award proportional marks based on keyword coverage."
                 )
             items_text = "\n---\n".join(question_keyword_info)
-            system_prompt = (
-                "You are a strict but fair university examiner. "
-                "Award marks honestly. NEVER exceed max_marks for any question. "
-                "IMPORTANT: Each question has its OWN specific expected keywords. "
-                "Check the expected keywords listed for EACH question individually. "
-                "Do NOT use the same keywords for all questions. "
-                "Respond ONLY with a valid JSON array. "
-                "Each object: question_id, awarded_marks (int 0..max_marks), feedback (1-2 sentences)."
-            )
-            user_prompt=(f"Evaluate these answers with per-question keyword matching:\n{items_text}\n"
-            f'Return ONLY JSON like: [{{"question_id":"q1","awarded_marks":2,"feedback":"Good answer with key terms."}}]')
-            raw = chat_completion(
-                messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}],
-                temperature=0.1, max_tokens=2000, timeout=30.0
-            )
-            raw=re.sub(r"^```[a-z]*\n?","",raw).rstrip("`").strip()
-            evaluations=json.loads(raw)
-            max_marks_map={a.question_id:a.max_marks for a in request.answers}
-            for ev in evaluations:
-                cap=max_marks_map.get(ev["question_id"],0)
-                ev["awarded_marks"]=max(0,min(int(ev["awarded_marks"]),cap))
-                ev["max_marks"]=cap
-            return {"evaluations":evaluations,"total_awarded":sum(ev["awarded_marks"] for ev in evaluations),"total_possible":sum(a.max_marks for a in request.answers)}
-        result = await asyncio.wait_for(loop.run_in_executor(_executor, _run_eval), timeout=35.0)
-        return result
-    except Exception as e:
-        import traceback; print(traceback.format_exc())
-        raise HTTPException(status_code=500,detail="Failed to evaluate answers.")
-# ============================================
-# === END: QUIZ ENDPOINTS FIXED ===
-# ============================================
-@app.post("/api/quiz/evaluate")
-async def quiz_evaluate(request: QuizEvaluateRequest):
-    try:
-        loop = asyncio.get_event_loop()
-        def _run_eval():
-            # FIX: Build per-question keyword matching instructions
-            question_keyword_info = []
-            for a in request.answers:
-                keywords = a.expected_keywords if a.expected_keywords else []
-                keyword_str = ", ".join(keywords) if keywords else "none specified"
-                question_keyword_info.append(
-                    f"Question ID: {a.question_id}\n"
-                    f"Question: {a.question}\n"
-                    f"Max marks: {a.max_marks}\n"
-                    f"Student answer: {a.student_answer or '[No answer]'}\n"
-                    f"Expected keywords for THIS question: {keyword_str}\n"
-                    f"Grade based on: Check if student answer contains the expected keywords for this specific question. "
-                    f"Award proportional marks based on keyword coverage."
-                )
-            items_text = "\n---\n".join(question_keyword_info)
-            
             system_prompt = (
                 "You are a strict but fair university examiner. "
                 "Award marks honestly. NEVER exceed max_marks for any question. "
@@ -1598,8 +1948,9 @@ async def quiz_evaluate(request: QuizEvaluateRequest):
     except Exception as e:
         import traceback; print(traceback.format_exc())
         raise HTTPException(status_code=500,detail="Failed to evaluate answers.")
+
 # ============================================
-# === END: QUIZ ENDPOINTS FIXED ===
+# === ROADMAP ENDPOINT ===
 # ============================================
 _RESOURCE_SITES = [
     ("W3Schools",      "w3schools.com",        "https://www.w3schools.com/",                            "tutorial"),
@@ -1618,15 +1969,18 @@ _RESOURCE_SITES = [
     ("Dev.to",         "dev.to",                "https://dev.to/search?q=",                              "article"),
     ("Stack Overflow", "stackoverflow.com",     "https://stackoverflow.com/search?q=",                   "docs"),
 ]
+
 def _make_resource_url(site_domain, native_base, query):
     encoded = requests.utils.quote(query)
     if site_domain:
         return f"https://www.google.com/search?q={encoded}+site%3A{site_domain}"
     return native_base + encoded
+
 def _fallback_resources(lesson_title: str, subject: str) -> list:
     query = f"{subject} {lesson_title}"
     return [{"title":f"{name} — {lesson_title}","url":_make_resource_url(domain,native,query),"type":rtype}
             for name,domain,native,rtype in _RESOURCE_SITES]
+
 def _generate_roadmap_sync(subject: str) -> dict:
     system_prompt = (
         "You are a curriculum designer. Output ONLY a raw JSON array — "
@@ -1686,6 +2040,7 @@ def _generate_roadmap_sync(subject: str) -> dict:
             ("Advanced Topics",         f"Tackle advanced areas in {subject}."),
         ]
         return {"lessons":[{"title":t,"content":c,"resources":_fallback_resources(t,subject)[:5]} for t,c in generic]}
+
 @app.post("/api/roadmap")
 async def generate_roadmap(request: RoadmapRequest):
     subject = request.subject.strip()
@@ -1694,11 +2049,13 @@ async def generate_roadmap(request: RoadmapRequest):
     loop   = asyncio.get_event_loop()
     result = await asyncio.wait_for(loop.run_in_executor(_executor, _generate_roadmap_sync, subject), timeout=35.0)
     return result
+
 @app.on_event("shutdown")
 async def shutdown_event():
     _executor.shutdown(wait=False)
     with _groq_client_lock:
         _groq_client_instances.clear()
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
