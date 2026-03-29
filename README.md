@@ -62,7 +62,7 @@ An intelligent AI assistant system with advanced function calling capabilities, 
 5. **Start the backend server**
    ```bash
    # From Backend/ directory with virtual environment activated
-   python main.py
+   uvicorn main:app --reload --port 8000
    ```
 
 The application will be available at `http://localhost:5173` (frontend) and the API at `http://localhost:8000` (backend).
