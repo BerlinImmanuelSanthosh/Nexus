@@ -1,6 +1,6 @@
 import { QuizResult } from '@/types/quiz';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, TrendingUp, TrendingDown, BarChart3, Target, BookOpen, Flame } from 'lucide-react';
+import { ArrowLeft, TrendingUp, TrendingDown, BarChart3, Target, BookOpen, Flame, Lightbulb } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LineChart, Line, CartesianGrid
@@ -196,6 +196,35 @@ const PerformanceTracker = ({ results, onBack }: PerformanceTrackerProps) => {
                 </p>
               </div>
             )}
+
+            {/* Always-on improvement suggestions */}
+            <div className="rounded-xl border border-primary/30 bg-primary/5 p-5 space-y-3">
+              <div className="flex items-center gap-2">
+                <Lightbulb className="h-4 w-4 text-primary" />
+                <p className="text-sm font-semibold text-foreground">
+                  Suggestions to boost your score
+                </p>
+              </div>
+              <ul className="space-y-2 text-sm text-muted-foreground list-disc pl-5">
+                {average < 50 && (
+                  <li><span className="font-medium text-foreground">Start with the basics:</span> build a roadmap on your weakest subject and complete every lesson before re-attempting a quiz.</li>
+                )}
+                {average >= 50 && average < 75 && (
+                  <li><span className="font-medium text-foreground">Close the gap:</span> review every wrong answer's feedback and re-quiz the same topic within 24 hours.</li>
+                )}
+                {average >= 75 && (
+                  <li><span className="font-medium text-foreground">Push for mastery:</span> try harder difficulty quizzes and longer written questions to consolidate knowledge.</li>
+                )}
+                {weakSubjects.length > 0 && (
+                  <li><span className="font-medium text-foreground">Focus on weak areas:</span> {weakSubjects.map(s => s.subject).join(', ')} — take a focused 5-question quiz on each.</li>
+                )}
+                <li><span className="font-medium text-foreground">Active recall:</span> after each quiz, write down the key concept in your own words.</li>
+                <li><span className="font-medium text-foreground">Spaced repetition:</span> revisit a topic 1 day, 3 days, and 7 days after first studying it.</li>
+                <li><span className="font-medium text-foreground">Use the chat:</span> ask NexusAI to re-explain any question you got wrong in simpler terms.</li>
+                <li><span className="font-medium text-foreground">Practice 'Real Mode':</span> simulates exam pressure and improves recall under stress.</li>
+              </ul>
+            </div>
+
 
             {/* Praise if doing well */}
             {results.length >= 2 && isImproving && weakSubjects.length === 0 && (
