@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   QuizConfig,
   QuizQuestion,
@@ -14,8 +14,28 @@ import {
 const API = "http://localhost:8000";
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
+const QUIZ_RESULTS_KEY = 'nexusai_quiz_results';
+
+function loadQuizResults(): QuizResult[] {
+  try {
+    const raw = localStorage.getItem(QUIZ_RESULTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return parsed.map((r: any) => ({ ...r, date: new Date(r.date) }));
+  } catch {
+    return [];
+  }
+}
+
 export function useQuiz() {
-  const [quizResults, setQuizResults]   = useState<QuizResult[]>([]);
+  const [quizResults, setQuizResults]   = useState<QuizResult[]>(() => loadQuizResults());
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(QUIZ_RESULTS_KEY, JSON.stringify(quizResults));
+    } catch {}
+  }, [quizResults]);
+
   const [currentQuiz, setCurrentQuiz]   = useState<{
     config: QuizConfig;
     questions: QuizQuestion[];
