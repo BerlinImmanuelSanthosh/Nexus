@@ -45,46 +45,48 @@ export interface QuizConfig {
   timeHours: number;
   timeMinutes: number;
   mode: 'normal' | 'real';
+  useFileContext?: boolean;
 }
 
 export interface QuestionConfig {
   marks: number;
   count: number;
-  orChoice?: boolean; // For 2+ mark questions: each question has a/b choice options
+  orChoice?: boolean;
 }
 
-// Use QuizQuestionItem for the base question data, extended with quiz‑specific fields
-export interface QuizQuestion extends QuizQuestionItem {
-  // Inherits id, question, max_marks, expected_answer from QuizQuestionItem
-  options?: string[]; // For 1‑mark MCQ questions
+export interface QuizQuestion {
+  id: string;
+  question: string;
+  marks: number;
   type: 'mcq' | 'written';
-  orGroup?: number;   // Questions with same orGroup are a/b choices
-  orLabel?: 'a' | 'b'; // Which choice variant this is
+  options?: string[];
+  expected_answer?: string;
+  orGroup?: number;
+  orLabel?: 'a' | 'b';
 }
 
-// Use QuizAnswerItem for the answer data, extended with canvas support
-export interface QuizAnswer extends Omit<QuizAnswerItem, 'student_answer'> {
-  // Override student_answer to allow more detailed answer types
-  student_answer?: string;
-  selectedOption?: string; // For MCQ
-  textAnswer?: string;     // For written
-  canvasData?: string;     // For drawing (base64)
-  // Keep question_id and max_marks as inherited from QuizAnswerItem
+export interface QuizAnswer {
+  questionId: string;
+  selectedOption?: string;
+  textAnswer?: string;
+  canvasData?: string;
 }
 
-// Use QuizResultData for the core result data, extended with metadata and flags
-export interface QuizResult extends Omit<QuizResultData, 'evaluations' | 'total_awarded' | 'total_possible'> {
+export interface QuestionResult {
+  questionId: string;
+  question: string;
+  marks: number;
+  obtainedMarks: number;
+  feedback: string;
+  isCorrect: boolean;
+}
+
+export interface QuizResult {
   id: string;
   subject: string;
   date: Date;
-  totalMarks: number;      // Alias for total_possible
-  obtainedMarks: number;   // Alias for total_awarded
+  totalMarks: number;
+  obtainedMarks: number;
   mode: 'normal' | 'real';
-  questionResults: QuestionResult[]; // Detailed per‑question results
-}
-
-// QuestionResult uses EvaluatedAnswer as a base, adding extra fields like isCorrect
-export interface QuestionResult extends Omit<EvaluatedAnswer, 'awarded_marks'> {
-  obtainedMarks: number;   // Alias for awarded_marks
-  isCorrect: boolean;      // Convenience flag
+  questionResults: QuestionResult[];
 }
